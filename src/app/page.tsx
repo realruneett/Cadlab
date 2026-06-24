@@ -11,7 +11,8 @@ import {
   getVisualDiff,
   getAnnotations,
   addAnnotation,
-  resolveAnnotation
+  resolveAnnotation,
+  persistTokenToDatabase
 } from './actions';
 import { ParsedHardwareData } from '@/lib/parsers/parser';
 import { DiffedHardwareData } from '@/lib/diff/diffEngine';
@@ -199,6 +200,17 @@ export default function Dashboard() {
     }
   };
 
+  const handlePersistToken = async () => {
+    try {
+      const updatedUser = await persistTokenToDatabase();
+      setUser(updatedUser);
+      alert("GitHub connection successfully saved to database!");
+    } catch (err) {
+      console.error(err);
+      alert("Failed to save connection to database.");
+    }
+  };
+
   if (loadingAuth) {
     return (
       <div className="h-screen w-screen bg-[#080b13] flex items-center justify-center text-slate-400 font-mono">
@@ -246,21 +258,33 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Repository Switcher */}
-        <div className="flex items-center gap-2">
-          <Database className="w-4 h-4 text-cyan-400" />
-          <select
-            value={selectedRepo?.id || ''}
-            onChange={(e) => setSelectedRepo(repositories.find(r => r.id === e.target.value))}
-            className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-1 text-xs font-semibold cursor-pointer outline-none focus:border-cyan-500"
-            title="Select repository"
-            aria-label="Select repository"
-          >
-            {repositories.map(repo => (
-              <option key={repo.id} value={repo.id}>{repo.slug}</option>
-            ))}
-          </select>
-          {selectedRepo?.isPrivate && <Lock className="w-3 h-3 text-slate-500" />}
+        {/* Repository Switcher & DB Persist Button */}
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <Database className="w-4 h-4 text-cyan-400" />
+            <select
+              value={selectedRepo?.id || ''}
+              onChange={(e) => setSelectedRepo(repositories.find(r => r.id === e.target.value))}
+              className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-1 text-xs font-semibold cursor-pointer outline-none focus:border-cyan-500"
+              title="Select repository"
+              aria-label="Select repository"
+            >
+              {repositories.map(repo => (
+                <option key={repo.id} value={repo.id}>{repo.slug}</option>
+              ))}
+            </select>
+            {selectedRepo?.isPrivate && <Lock className="w-3 h-3 text-slate-500" />}
+          </div>
+
+          {user && !user.accessToken && (
+            <button
+              onClick={handlePersistToken}
+              className="px-2.5 py-1 bg-gradient-to-tr from-cyan-500 to-emerald-500 hover:from-cyan-400 hover:to-emerald-400 text-slate-950 font-bold text-[10px] rounded-lg shadow-md transition-all flex items-center gap-1 cursor-pointer"
+              title="Save GitHub connection to Database"
+            >
+              <Database className="w-3 h-3" /> Save Connection to DB
+            </button>
+          )}
         </div>
 
         <button 

@@ -25,19 +25,51 @@ export async function getCurrentUser() {
   });
 }
 
+/**
+ * Retrieves the active GitHub token, prioritizing the session cookie before falling back to the database.
+ */
+export async function getGitHubToken() {
+  const cookieStore = await cookies();
+  const sessionToken = cookieStore.get('cadlab_github_token')?.value;
+  if (sessionToken) return sessionToken;
+
+  // Fallback to database token if persisted
+  const user = await getCurrentUser();
+  return user?.accessToken || null;
+}
+
+/**
+ * Persists the current session token into the database at the user's request.
+ */
+export async function persistTokenToDatabase() {
+  const user = await getCurrentUser();
+  if (!user) throw new Error("Unauthorized: User session not found");
+
+  const token = await getGitHubToken();
+  if (!token) throw new Error("No active GitHub session token to persist");
+
+  const prisma = getPrisma();
+  return prisma.user.update({
+    where: { id: user.id },
+    data: { accessToken: token }
+  });
+}
+
 export async function logoutUser() {
   const cookieStore = await cookies();
   cookieStore.delete('cadlab_user_id');
+  cookieStore.delete('cadlab_github_token');
 }
 
 export async function getRepositories() {
   const user = await getCurrentUser();
-  if (!user || !user.accessToken) {
-    return []; // Return empty or map local fallback definitions
-  }
+  if (!user) return [];
+
+  const token = await getGitHubToken();
+  if (!token) return [];
 
   try {
-    const remoteRepos = await fetchRemoteRepositories(user.accessToken);
+    const remoteRepos = await fetchRemoteRepositories(token);
     const prisma = getPrisma();
 
     // Cache tracking records on-the-fly to allow annotation lookups
@@ -66,36 +98,36 @@ export async function getRepositories() {
 }
 
 export async function getCommits(repositoryId: string) {
-  const user = await getCurrentUser();
-  if (!user || !user.accessToken) throw new Error("Unauthorized user access context");
+  const token = await getGitHubToken();
+  if (!token) throw new Error("Unauthorized user access context - missing token");
 
   const prisma = getPrisma();
   const repo = await prisma.repository.findUnique({ where: { id: repositoryId } });
   if (!repo) throw new Error("Repository targets not found");
 
-  return fetchRemoteCommits(user.accessToken, repo.slug);
+  return fetchRemoteCommits(token, repo.slug);
 }
 
 export async function getFiles(repositoryId: string, commitHash: string) {
-  const user = await getCurrentUser();
-  if (!user || !user.accessToken) return [];
+  const token = await getGitHubToken();
+  if (!token) return [];
 
   const prisma = getPrisma();
   const repo = await prisma.repository.findUnique({ where: { id: repositoryId } });
   if (!repo) return [];
 
-  return fetchRemoteFiles(user.accessToken, repo.slug, commitHash);
+  return fetchRemoteFiles(token, repo.slug, commitHash);
 }
 
 export async function getParsedFile(repositoryId: string, commitHash: string, filePath: string): Promise<ParsedHardwareData> {
-  const user = await getCurrentUser();
-  if (!user || !user.accessToken) throw new Error("Unauthorized identity validation context");
+  const token = await getGitHubToken();
+  if (!token) throw new Error("Unauthorized identity validation context - missing token");
 
   const prisma = getPrisma();
   const repo = await prisma.repository.findUnique({ where: { id: repositoryId } });
   if (!repo) throw new Error("Repository target not verified");
 
-  const rawContent = await fetchRemoteContent(user.accessToken, repo.slug, commitHash, filePath);
+  const rawContent = await fetchRemoteContent(token, repo.slug, commitHash, filePath);
   return parseHardwareFile(filePath, rawContent);
 }
 
@@ -105,8 +137,8 @@ export async function getVisualDiff(
   newCommitHash: string,
   filePath: string
 ): Promise<DiffedHardwareData> {
-  const user = await getCurrentUser();
-  if (!user || !user.accessToken) throw new Error("Unauthorized access configuration block");
+  const token = await getGitHubToken();
+  if (!token) throw new Error("Unauthorized access configuration block - missing token");
 
   const prisma = getPrisma();
   const repo = await prisma.repository.findUnique({ where: { id: repositoryId } });
@@ -114,8 +146,8 @@ export async function getVisualDiff(
 
   // Fetching files concurrently across arbitrary commit references
   const [oldContent, newContent] = await Promise.all([
-    fetchRemoteContent(user.accessToken, repo.slug, oldCommitHash, filePath),
-    fetchRemoteContent(user.accessToken, repo.slug, newCommitHash, filePath)
+    fetchRemoteContent(token, repo.slug, oldCommitHash, filePath),
+    fetchRemoteContent(token, repo.slug, newCommitHash, filePath)
   ]);
 
   const oldParsed = parseHardwareFile(filePath, oldContent);

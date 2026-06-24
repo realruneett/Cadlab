@@ -45,12 +45,11 @@ export async function GET(request: NextRequest) {
     const emailsData = await emailsResponse.json();
     const primaryEmail = emailsData.find((e: any) => e.primary)?.email || userData.email;
 
-    // 4. Update or Upsert inside Database
+    // 4. Update or Upsert inside Database (without saving accessToken to DB)
     const prisma = getPrisma();
     const user = await prisma.user.upsert({
       where: { email: primaryEmail },
       update: {
-        accessToken: accessToken,
         name: userData.name || userData.login,
         githubId: userData.id,
       },
@@ -58,7 +57,7 @@ export async function GET(request: NextRequest) {
         email: primaryEmail,
         name: userData.name || userData.login,
         githubId: userData.id,
-        accessToken: accessToken,
+        accessToken: null, // Only saved if user explicitly chooses to
       },
     });
 
@@ -69,6 +68,14 @@ export async function GET(request: NextRequest) {
       secure: process.env.NODE_ENV === 'production',
       path: '/',
       maxAge: 60 * 60 * 24 * 7, // 1 Week
+    });
+
+    // Store GitHub token in session cookie
+    cookieStore.set('cadlab_github_token', accessToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      path: '/',
+      maxAge: 60 * 60 * 24, // 1 Day
     });
 
     return NextResponse.redirect(new URL('/', request.url));
