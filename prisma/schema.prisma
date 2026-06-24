@@ -8,11 +8,13 @@ generator client {
 }
 
 model User {
-  id        String   @id @default(uuid())
-  email     String   @unique
-  name      String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id           String   @id @default(uuid())
+  email        String   @unique
+  name         String?
+  githubId     Int?     @unique
+  accessToken  String?  // Stores GitHub OAuth access token for authenticated API requests
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
   
   repositories Repository[]
   annotations  Annotation[]
@@ -21,9 +23,10 @@ model User {
 model Repository {
   id          String   @id @default(uuid())
   name        String
-  slug        String   @unique
+  slug        String   @unique // tracking format: "owner/repo-name"
   description String?
-  gitPath     String   // Path to the local git repo on disk
+  isPrivate   Boolean  @default(false)
+  gitPath     String   // Can be kept for backward compatibility or left blank for remote git
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   
