@@ -18,6 +18,7 @@ import { ParsedHardwareData } from '@/lib/parsers/parser';
 import { DiffedHardwareData } from '@/lib/diff/diffEngine';
 import HardwareCanvas from '@/components/hardware-canvas';
 import DiffCanvas from '@/components/diff-canvas';
+import SideBySideCanvas from '@/components/side-by-side-canvas';
 import {
   GitBranch,
   GitCommit,
@@ -65,6 +66,10 @@ export default function Dashboard() {
   const [visibleLayers, setVisibleLayers] = useState<string[]>([]);
   const [isDiffMode, setIsDiffMode] = useState<boolean>(false);
   const [opacity, setOpacity] = useState<number>(0.5);
+
+  // Toggle modes for comparison display style and timeline scope
+  const [diffDisplayMode, setDiffDisplayMode] = useState<'overlay' | 'sideBySide'>('overlay');
+  const [diffScope, setDiffScope] = useState<'overall' | 'commit'>('overall');
 
   // Annotations
   const [annotations, setAnnotations] = useState<any[]>([]);
@@ -117,6 +122,18 @@ export default function Dashboard() {
     }
     loadCommits();
   }, [selectedRepo]);
+
+  // 3b. Automatically select parent commit for 'per-commit' scope comparison
+  useEffect(() => {
+    if (diffScope === 'commit' && commitB && commits.length > 0) {
+      const idx = commits.findIndex(c => c.hash === commitB);
+      if (idx !== -1 && idx + 1 < commits.length) {
+        setCommitA(commits[idx + 1].hash);
+      } else {
+        setCommitA(commitB); // Fallback to same if first commit
+      }
+    }
+  }, [diffScope, commitB, commits]);
 
   // 4. Fetch structural folder design items mapping to current selections
   useEffect(() => {
@@ -316,7 +333,7 @@ export default function Dashboard() {
             </div>
 
             {/* Unconstrained Target Picker Framework */}
-            <div className="space-y-2 bg-slate-950/80 p-2.5 rounded-lg border border-slate-900 text-xs">
+            <div className="space-y-2.5 bg-slate-950/80 p-2.5 rounded-lg border border-slate-900 text-xs">
               <div className="space-y-1">
                 <label className="text-[10px] font-mono text-slate-500 block uppercase">Target Commit B (Newer Head)</label>
                 <select 
@@ -331,18 +348,66 @@ export default function Dashboard() {
               </div>
 
               {isDiffMode && (
-                <div className="space-y-1 pt-1 border-t border-slate-900">
-                  <label className="text-[10px] font-mono text-slate-500 block uppercase">Base Commit A (Older Root)</label>
-                  <select 
-                    value={commitA} 
-                    onChange={(e) => setCommitA(e.target.value)}
-                    className="w-full bg-slate-900 border border-slate-800 px-2 py-1 rounded text-slate-300 outline-none cursor-pointer"
-                    title="Base commit A"
-                    aria-label="Base commit A"
-                  >
-                    {commits.map(c => <option key={c.hash} value={c.hash}>{c.message.slice(0, 30)}... [{c.hash.slice(0,6)}]</option>)}
-                  </select>
-                </div>
+                <>
+                  <div className="flex items-center justify-between pt-1 border-t border-slate-900">
+                    <span className="text-[9px] text-slate-500 font-mono uppercase">Diff Scope:</span>
+                    <div className="flex gap-1 bg-slate-900 p-0.5 rounded border border-slate-800">
+                      <button
+                        onClick={() => setDiffScope('commit')}
+                        className={`px-1.5 py-0.5 rounded text-[9px] font-semibold transition-all cursor-pointer ${
+                          diffScope === 'commit' ? 'bg-cyan-500 text-slate-950 font-bold' : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        Per Commit
+                      </button>
+                      <button
+                        onClick={() => setDiffScope('overall')}
+                        className={`px-1.5 py-0.5 rounded text-[9px] font-semibold transition-all cursor-pointer ${
+                          diffScope === 'overall' ? 'bg-cyan-500 text-slate-950 font-bold' : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        Overall
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between pt-1 border-t border-slate-900">
+                    <span className="text-[9px] text-slate-500 font-mono uppercase">Layout style:</span>
+                    <div className="flex gap-1 bg-slate-900 p-0.5 rounded border border-slate-800">
+                      <button
+                        onClick={() => setDiffDisplayMode('overlay')}
+                        className={`px-1.5 py-0.5 rounded text-[9px] font-semibold transition-all cursor-pointer ${
+                          diffDisplayMode === 'overlay' ? 'bg-cyan-500 text-slate-950 font-bold' : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        Overlay
+                      </button>
+                      <button
+                        onClick={() => setDiffDisplayMode('sideBySide')}
+                        className={`px-1.5 py-0.5 rounded text-[9px] font-semibold transition-all cursor-pointer ${
+                          diffDisplayMode === 'sideBySide' ? 'bg-cyan-500 text-slate-950 font-bold' : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        Split View
+                      </button>
+                    </div>
+                  </div>
+
+                  {diffScope === 'overall' && (
+                    <div className="space-y-1 pt-1 border-t border-slate-900">
+                      <label className="text-[10px] font-mono text-slate-500 block uppercase">Base Commit A (Older Root)</label>
+                      <select 
+                        value={commitA} 
+                        onChange={(e) => setCommitA(e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-800 px-2 py-1 rounded text-slate-300 outline-none cursor-pointer"
+                        title="Base commit A"
+                        aria-label="Base commit A"
+                      >
+                        {commits.map(c => <option key={c.hash} value={c.hash}>{c.message.slice(0, 30)}... [{c.hash.slice(0,6)}]</option>)}
+                      </select>
+                    </div>
+                  )}
+                </>
               )}
             </div>
           </div>
@@ -384,7 +449,7 @@ export default function Dashboard() {
               </p>
             </div>
 
-            {isDiffMode && diffData && (
+            {isDiffMode && diffData && diffDisplayMode === 'overlay' && (
               <div className="bg-slate-950 px-4 py-1.5 rounded-xl border border-slate-800 flex items-center gap-4 text-xs font-mono">
                 <span className="text-red-400">Rev A (Red)</span>
                 <input
@@ -401,7 +466,11 @@ export default function Dashboard() {
 
           <div className="flex-1 relative min-h-0">
             {isDiffMode && diffData ? (
-              <DiffCanvas diffData={diffData} visibleLayers={visibleLayers} opacity={opacity} />
+              diffDisplayMode === 'sideBySide' ? (
+                <SideBySideCanvas diffData={diffData} visibleLayers={visibleLayers} />
+              ) : (
+                <DiffCanvas diffData={diffData} visibleLayers={visibleLayers} opacity={opacity} />
+              )
             ) : parsedData ? (
               <HardwareCanvas
                 data={parsedData} visibleLayers={visibleLayers} annotations={annotations}
