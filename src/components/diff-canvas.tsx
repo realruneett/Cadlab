@@ -407,18 +407,24 @@ export default function DiffCanvas({
           <button
             onClick={() => handleZoom('in')}
             className="p-2 bg-slate-900/90 hover:bg-slate-800 backdrop-blur-md rounded-lg border border-slate-800 text-slate-300 hover:text-white transition-all shadow-lg"
+            title="Zoom In"
+            aria-label="Zoom In"
           >
             <ZoomIn className="w-4 h-4" />
           </button>
           <button
             onClick={() => handleZoom('out')}
             className="p-2 bg-slate-900/90 hover:bg-slate-800 backdrop-blur-md rounded-lg border border-slate-800 text-slate-300 hover:text-white transition-all shadow-lg"
+            title="Zoom Out"
+            aria-label="Zoom Out"
           >
             <ZoomOut className="w-4 h-4" />
           </button>
           <button
             onClick={handleReset}
             className="p-2 bg-slate-900/90 hover:bg-slate-800 backdrop-blur-md rounded-lg border border-slate-800 text-slate-300 hover:text-white transition-all shadow-lg"
+            title="Reset View"
+            aria-label="Reset View"
           >
             <Maximize className="w-4 h-4" />
           </button>

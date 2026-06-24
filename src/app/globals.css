@@ -22,6 +22,7 @@ body {
 /* Glassmorphic panel styling */
 .glass-panel {
   background: rgba(15, 23, 42, 0.45);
+  -webkit-backdrop-filter: blur(16px);
   backdrop-filter: blur(16px);
   border: 1px solid rgba(255, 255, 255, 0.06);
 }

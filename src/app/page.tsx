@@ -253,6 +253,8 @@ export default function Dashboard() {
             value={selectedRepo?.id || ''}
             onChange={(e) => setSelectedRepo(repositories.find(r => r.id === e.target.value))}
             className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-1 text-xs font-semibold cursor-pointer outline-none focus:border-cyan-500"
+            title="Select repository"
+            aria-label="Select repository"
           >
             {repositories.map(repo => (
               <option key={repo.id} value={repo.id}>{repo.slug}</option>
@@ -297,6 +299,8 @@ export default function Dashboard() {
                   value={commitB} 
                   onChange={(e) => setCommitB(e.target.value)}
                   className="w-full bg-slate-900 border border-slate-800 px-2 py-1 rounded text-slate-300 outline-none cursor-pointer"
+                  title="Target commit B"
+                  aria-label="Target commit B"
                 >
                   {commits.map(c => <option key={c.hash} value={c.hash}>{c.message.slice(0, 30)}... [{c.hash.slice(0,6)}]</option>)}
                 </select>
@@ -309,6 +313,8 @@ export default function Dashboard() {
                     value={commitA} 
                     onChange={(e) => setCommitA(e.target.value)}
                     className="w-full bg-slate-900 border border-slate-800 px-2 py-1 rounded text-slate-300 outline-none cursor-pointer"
+                    title="Base commit A"
+                    aria-label="Base commit A"
                   >
                     {commits.map(c => <option key={c.hash} value={c.hash}>{c.message.slice(0, 30)}... [{c.hash.slice(0,6)}]</option>)}
                   </select>
@@ -361,6 +367,8 @@ export default function Dashboard() {
                   type="range" min="0" max="1" step="0.01" value={opacity}
                   onChange={(e) => setOpacity(parseFloat(e.target.value))}
                   className="w-32 h-1 bg-slate-800 rounded-lg appearance-none accent-emerald-500 cursor-pointer"
+                  title="Opacity blending slider"
+                  aria-label="Opacity blending slider"
                 />
                 <span className="text-emerald-400">Rev B (Green)</span>
               </div>
