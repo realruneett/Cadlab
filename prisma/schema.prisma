@@ -1,0 +1,63 @@
+datasource db {
+  provider = "sqlite"
+}
+
+generator client {
+  provider = "prisma-client-js"
+  engineType = "library"
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  repositories Repository[]
+  annotations  Annotation[]
+}
+
+model Repository {
+  id          String   @id @default(uuid())
+  name        String
+  slug        String   @unique
+  description String?
+  gitPath     String   // Path to the local git repo on disk
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  ownerId     String
+  owner       User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  commits     Commit[]
+}
+
+model Commit {
+  id           String   @id @default(uuid())
+  hash         String   // Git commit hash
+  message      String
+  authorName   String
+  authorEmail  String
+  createdAt    DateTime
+  
+  repositoryId String
+  repository   Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  
+  @@unique([repositoryId, hash])
+}
+
+model Annotation {
+  id         String   @id @default(uuid())
+  commitHash String
+  filePath   String
+  layerId    String   // e.g. "Top", "Bottom", "Schematic"
+  x          Float    // native board coordinate X
+  y          Float    // native board coordinate Y
+  content    String
+  resolved   Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  
+  authorId   String
+  author     User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+}
