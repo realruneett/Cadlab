@@ -20,7 +20,6 @@ export interface DiffedPCBData {
   type: 'pcb';
   bounds: { minX: number; minY: number; maxX: number; maxY: number };
   layers: string[];
-  // Revisions representation
   oldRevision: {
     components: DiffedComponent[];
     traces: DiffedTrace[];
@@ -83,7 +82,6 @@ export function computeVisualDiff(oldData: ParsedHardwareData, newData: ParsedHa
     throw new Error("Cannot diff files of different types (Schematic vs PCB)");
   }
 
-  // Calculate union bounding box
   const bounds = {
     minX: Math.min(oldData.bounds.minX, newData.bounds.minX),
     minY: Math.min(oldData.bounds.minY, newData.bounds.minY),
@@ -95,7 +93,6 @@ export function computeVisualDiff(oldData: ParsedHardwareData, newData: ParsedHa
     const oldPCB = oldData as PCBData;
     const newPCB = newData as PCBData;
 
-    // Component Diffing (match by designator)
     const oldComps: DiffedComponent[] = [];
     const newComps: DiffedComponent[] = [];
 
@@ -105,134 +102,104 @@ export function computeVisualDiff(oldData: ParsedHardwareData, newData: ParsedHa
     const newCompsMap = new Map<string, Component>();
     newPCB.components.forEach(c => newCompsMap.set(c.designator, c));
 
-    // Process old components
     oldPCB.components.forEach(c => {
       const match = newCompsMap.get(c.designator);
       if (!match) {
-        // Deleted
         oldComps.push({ ...c, diffStatus: 'deleted' });
       } else {
         const moved = Math.hypot(c.x - match.x, c.y - match.y) > 0.05 || 
                       Math.abs(c.rotation - match.rotation) > 0.5 ||
                       c.value !== match.value;
-        if (moved) {
-          oldComps.push({ ...c, diffStatus: 'modified' });
-        } else {
-          oldComps.push({ ...c, diffStatus: 'unchanged' });
-        }
+        oldComps.push({ ...c, diffStatus: moved ? 'modified' : 'unchanged' });
       }
     });
 
-    // Process new components
     newPCB.components.forEach(c => {
       const match = oldCompsMap.get(c.designator);
       if (!match) {
-        // Added
         newComps.push({ ...c, diffStatus: 'added' });
       } else {
         const moved = Math.hypot(c.x - match.x, c.y - match.y) > 0.05 || 
                       Math.abs(c.rotation - match.rotation) > 0.5 ||
                       c.value !== match.value;
-        if (moved) {
-          newComps.push({ ...c, diffStatus: 'modified' });
-        } else {
-          newComps.push({ ...c, diffStatus: 'unchanged' });
-        }
+        newComps.push({ ...c, diffStatus: moved ? 'modified' : 'unchanged' });
       }
     });
 
-    // Trace segment diffing
+    // SURGICAL TRACE DIFFING: Map every segment down to 2-point objects
     const oldTraces: DiffedTrace[] = [];
     const newTraces: DiffedTrace[] = [];
 
-    // Map trace segments
-    const oldSegMap = new Map<string, Trace>();
+    const oldSegMap = new Map<string, boolean>();
     oldPCB.traces.forEach(t => {
-      if (t.points.length >= 2) {
-        for (let i = 0; i < t.points.length - 1; i++) {
-          const key = getSegmentKey(t.points[i], t.points[i + 1], t.layer);
-          oldSegMap.set(key, t);
-        }
-      }
-    });
-
-    const newSegMap = new Map<string, Trace>();
-    newPCB.traces.forEach(t => {
-      if (t.points.length >= 2) {
-        for (let i = 0; i < t.points.length - 1; i++) {
-          const key = getSegmentKey(t.points[i], t.points[i + 1], t.layer);
-          newSegMap.set(key, t);
-        }
-      }
-    });
-
-    // Output traces
-    oldPCB.traces.forEach(t => {
-      // For multi-segment traces, classify each segment, or simplify to trace level
-      let allUnchanged = true;
       for (let i = 0; i < t.points.length - 1; i++) {
         const key = getSegmentKey(t.points[i], t.points[i + 1], t.layer);
-        if (!newSegMap.has(key)) {
-          allUnchanged = false;
-          break;
-        }
+        oldSegMap.set(key, true);
       }
-      oldTraces.push({
-        ...t,
-        diffStatus: allUnchanged ? 'unchanged' : 'deleted'
-      });
     });
 
+    const newSegMap = new Map<string, boolean>();
     newPCB.traces.forEach(t => {
-      let allUnchanged = true;
       for (let i = 0; i < t.points.length - 1; i++) {
         const key = getSegmentKey(t.points[i], t.points[i + 1], t.layer);
-        if (!oldSegMap.has(key)) {
-          allUnchanged = false;
-          break;
-        }
+        newSegMap.set(key, true);
       }
-      newTraces.push({
-        ...t,
-        diffStatus: allUnchanged ? 'unchanged' : 'added'
-      });
     });
 
-    // Via diffing
+    // Breakdown compound old traces into standalone single-segment diff items
+    oldPCB.traces.forEach(t => {
+      for (let i = 0; i < t.points.length - 1; i++) {
+        const p1 = t.points[i];
+        const p2 = t.points[i + 1];
+        const key = getSegmentKey(p1, p2, t.layer);
+        const existsInNew = newSegMap.has(key);
+
+        oldTraces.push({
+          ...t,
+          points: [p1, p2], // Slice trace array to single vector segment
+          diffStatus: existsInNew ? 'unchanged' : 'deleted'
+        });
+      }
+    });
+
+    // Breakdown compound new traces into standalone single-segment diff items
+    newPCB.traces.forEach(t => {
+      for (let i = 0; i < t.points.length - 1; i++) {
+        const p1 = t.points[i];
+        const p2 = t.points[i + 1];
+        const key = getSegmentKey(p1, p2, t.layer);
+        const existsInOld = oldSegMap.has(key);
+
+        newTraces.push({
+          ...t,
+          points: [p1, p2], // Slice trace array to single vector segment
+          diffStatus: existsInOld ? 'unchanged' : 'added'
+        });
+      }
+    });
+
     const oldVias: DiffedVia[] = [];
     const newVias: DiffedVia[] = [];
-
     const oldViasMap = new Map<string, Via>();
     oldPCB.vias.forEach(v => oldViasMap.set(getViaKey(v), v));
-
     const newViasMap = new Map<string, Via>();
     newPCB.vias.forEach(v => newViasMap.set(getViaKey(v), v));
 
-    // Old vias check
     oldPCB.vias.forEach(v => {
       const match = newViasMap.get(getViaKey(v));
-      if (!match) {
-        oldVias.push({ ...v, diffStatus: 'deleted' });
-      } else {
+      if (!match) oldVias.push({ ...v, diffStatus: 'deleted' });
+      else {
         const modified = v.drill !== match.drill || v.diameter !== match.diameter;
-        oldVias.push({
-          ...v,
-          diffStatus: modified ? 'modified' : 'unchanged'
-        });
+        oldVias.push({ ...v, diffStatus: modified ? 'modified' : 'unchanged' });
       }
     });
 
-    // New vias check
     newPCB.vias.forEach(v => {
       const match = oldViasMap.get(getViaKey(v));
-      if (!match) {
-        newVias.push({ ...v, diffStatus: 'added' });
-      } else {
+      if (!match) newVias.push({ ...v, diffStatus: 'added' });
+      else {
         const modified = v.drill !== match.drill || v.diameter !== match.diameter;
-        newVias.push({
-          ...v,
-          diffStatus: modified ? 'modified' : 'unchanged'
-        });
+        newVias.push({ ...v, diffStatus: modified ? 'modified' : 'unchanged' });
       }
     });
 
@@ -242,75 +209,47 @@ export function computeVisualDiff(oldData: ParsedHardwareData, newData: ParsedHa
       type: 'pcb',
       bounds,
       layers,
-      oldRevision: {
-        components: oldComps,
-        traces: oldTraces,
-        vias: oldVias
-      },
-      newRevision: {
-        components: newComps,
-        traces: newTraces,
-        vias: newVias
-      }
+      oldRevision: { components: oldComps, traces: oldTraces, vias: oldVias },
+      newRevision: { components: newComps, traces: newTraces, vias: newVias }
     };
   } else {
-    // Schematic Diffing
+    // Schematic Diffing Engine
     const oldSch = oldData as SchematicData;
     const newSch = newData as SchematicData;
 
     const oldComps: DiffedSchematicComponent[] = [];
     const newComps: DiffedSchematicComponent[] = [];
-
     const oldCompsMap = new Map<string, SchematicComponent>();
     oldSch.components.forEach(c => oldCompsMap.set(c.designator, c));
-
     const newCompsMap = new Map<string, SchematicComponent>();
     newSch.components.forEach(c => newCompsMap.set(c.designator, c));
 
-    // Old Schematic components check
     oldSch.components.forEach(c => {
       const match = newCompsMap.get(c.designator);
-      if (!match) {
-        oldComps.push({ ...c, diffStatus: 'deleted' });
-      } else {
-        const moved = Math.hypot(c.x - match.x, c.y - match.y) > 0.05 || 
-                      c.value !== match.value || 
-                      c.symbol !== match.symbol;
-        oldComps.push({
-          ...c,
-          diffStatus: moved ? 'modified' : 'unchanged'
-        });
+      if (!match) oldComps.push({ ...c, diffStatus: 'deleted' });
+      else {
+        const moved = Math.hypot(c.x - match.x, c.y - match.y) > 0.05 || c.value !== match.value || c.symbol !== match.symbol;
+        oldComps.push({ ...c, diffStatus: moved ? 'modified' : 'unchanged' });
       }
     });
 
-    // New Schematic components check
     newSch.components.forEach(c => {
       const match = oldCompsMap.get(c.designator);
-      if (!match) {
-        newComps.push({ ...c, diffStatus: 'added' });
-      } else {
-        const moved = Math.hypot(c.x - match.x, c.y - match.y) > 0.05 || 
-                      c.value !== match.value || 
-                      c.symbol !== match.symbol;
-        newComps.push({
-          ...c,
-          diffStatus: moved ? 'modified' : 'unchanged'
-        });
+      if (!match) newComps.push({ ...c, diffStatus: 'added' });
+      else {
+        const moved = Math.hypot(c.x - match.x, c.y - match.y) > 0.05 || c.value !== match.value || c.symbol !== match.symbol;
+        newComps.push({ ...c, diffStatus: moved ? 'modified' : 'unchanged' });
       }
     });
 
-    // Nets wire segment diffing
     const oldNets: DiffedSchematicNet[] = [];
     const newNets: DiffedSchematicNet[] = [];
 
     const oldSegMap = new Map<string, boolean>();
     oldSch.nets.forEach(n => {
       n.segments.forEach(seg => {
-        if (seg.points.length >= 2) {
-          for (let i = 0; i < seg.points.length - 1; i++) {
-            const key = getSegmentKey(seg.points[i], seg.points[i + 1], 'Schematic');
-            oldSegMap.set(key, true);
-          }
+        for (let i = 0; i < seg.points.length - 1; i++) {
+          oldSegMap.set(getSegmentKey(seg.points[i], seg.points[i + 1], 'Schematic'), true);
         }
       });
     });
@@ -318,56 +257,51 @@ export function computeVisualDiff(oldData: ParsedHardwareData, newData: ParsedHa
     const newSegMap = new Map<string, boolean>();
     newSch.nets.forEach(n => {
       n.segments.forEach(seg => {
-        if (seg.points.length >= 2) {
-          for (let i = 0; i < seg.points.length - 1; i++) {
-            const key = getSegmentKey(seg.points[i], seg.points[i + 1], 'Schematic');
-            newSegMap.set(key, true);
-          }
+        for (let i = 0; i < seg.points.length - 1; i++) {
+          newSegMap.set(getSegmentKey(seg.points[i], seg.points[i + 1], 'Schematic'), true);
         }
       });
     });
 
-    // Mark old nets
+    // Process granular old schematic segments
     oldSch.nets.forEach(n => {
-      let allUnchanged = true;
       n.segments.forEach(seg => {
         for (let i = 0; i < seg.points.length - 1; i++) {
-          const key = getSegmentKey(seg.points[i], seg.points[i + 1], 'Schematic');
-          if (!newSegMap.has(key)) allUnchanged = false;
+          const p1 = seg.points[i];
+          const p2 = seg.points[i + 1];
+          const existsInNew = newSegMap.has(getSegmentKey(p1, p2, 'Schematic'));
+
+          oldNets.push({
+            ...n,
+            segments: [{ points: [p1, p2] }], // Isolate vector path line
+            diffStatus: existsInNew ? 'unchanged' : 'deleted'
+          });
         }
-      });
-      oldNets.push({
-        ...n,
-        diffStatus: allUnchanged ? 'unchanged' : 'deleted'
       });
     });
 
-    // Mark new nets
+    // Process granular new schematic segments
     newSch.nets.forEach(n => {
-      let allUnchanged = true;
       n.segments.forEach(seg => {
         for (let i = 0; i < seg.points.length - 1; i++) {
-          const key = getSegmentKey(seg.points[i], seg.points[i + 1], 'Schematic');
-          if (!oldSegMap.has(key)) allUnchanged = false;
+          const p1 = seg.points[i];
+          const p2 = seg.points[i + 1];
+          const existsInOld = oldSegMap.has(getSegmentKey(p1, p2, 'Schematic'));
+
+          newNets.push({
+            ...n,
+            segments: [{ points: [p1, p2] }], // Isolate vector path line
+            diffStatus: existsInOld ? 'unchanged' : 'added'
+          });
         }
-      });
-      newNets.push({
-        ...n,
-        diffStatus: allUnchanged ? 'unchanged' : 'added'
       });
     });
 
     return {
       type: 'schematic',
       bounds,
-      oldRevision: {
-        components: oldComps,
-        nets: oldNets
-      },
-      newRevision: {
-        components: newComps,
-        nets: newNets
-      }
+      oldRevision: { components: oldComps, nets: oldNets },
+      newRevision: { components: newComps, nets: newNets }
     };
   }
 }

@@ -47,6 +47,12 @@ export default function DiffCanvas({
     }
   }, [diffData, dimensions.width, dimensions.height]);
 
+  const isLayerVisible = (layerName: string) => {
+    if (diffData.type === 'schematic') return true;
+    if (visibleLayers.length === 0) return true;
+    return visibleLayers.includes(layerName) || layerName === 'MultiLayer';
+  };
+
   // Main Draw Loop
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -77,12 +83,6 @@ export default function DiffCanvas({
       ctx.lineTo(dimensions.width, y);
       ctx.stroke();
     }
-
-    const isLayerVisible = (layerName: string) => {
-      if (diffData.type === 'schematic') return true;
-      if (visibleLayers.length === 0) return true;
-      return visibleLayers.includes(layerName) || layerName === 'MultiLayer';
-    };
 
     // Color mapper for diff status
     // Unchanged -> Muted Gray
@@ -348,6 +348,25 @@ export default function DiffCanvas({
     if (hoverText) {
       setHoverInfo({ x: sx, y: sy, text: hoverText, subText: hoverSubText });
     } else {
+      // Optional trace segment-level hover details mapping
+      if (diffData.type === 'pcb') {
+        for (const t of [...diffData.newRevision.traces, ...diffData.oldRevision.traces]) {
+          if (!isLayerVisible(t.layer)) continue;
+          const d = pointToSegmentDistance(native, t.points[0], t.points[1]);
+          if (d < t.width / 2 + 0.4) {
+            const statusStr = t.diffStatus === 'added' ? 'Added Track Segment (+)'
+                            : t.diffStatus === 'deleted' ? 'Removed Track Segment (-)'
+                            : 'Unchanged Routing';
+            setHoverInfo({
+              x: sx,
+              y: sy,
+              text: `Net: ${t.net}`,
+              subText: `${statusStr} | Width: ${t.width}mm`
+            });
+            return;
+          }
+        }
+      }
       setHoverInfo(null);
     }
   };
@@ -455,5 +474,17 @@ export default function DiffCanvas({
         className={`w-full h-full block cursor-grab ${isPanning ? 'cursor-grabbing' : ''}`}
       />
     </div>
+  );
+}
+
+// Distance helper from point to line segment
+function pointToSegmentDistance(pt: Point, p1: Point, p2: Point): number {
+  const l2 = Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2);
+  if (l2 === 0) return Math.hypot(pt.x - p1.x, pt.y - p1.y);
+  let t = ((pt.x - p1.x) * (p2.x - p1.x) + (pt.y - p1.y) * (p2.y - p1.y)) / l2;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(
+    pt.x - (p1.x + t * (p2.x - p1.x)),
+    pt.y - (p1.y + t * (p2.y - p1.y))
   );
 }

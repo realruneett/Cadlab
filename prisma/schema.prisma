@@ -8,36 +8,52 @@ generator client {
 }
 
 model User {
-  id           String   @id @default(uuid())
-  email        String   @unique
-  name         String?
-  githubId     Int?     @unique
-  accessToken  String?  // Stores GitHub OAuth access token for authenticated API requests
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id                String             @id @default(uuid())
+  email             String             @unique
+  name              String?
+  githubId          Int?               @unique
+  accessToken       String?            // Persistent token storage fallback
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
   
-  repositories Repository[]
-  annotations  Annotation[]
+  ownedRepositories Repository[]       @relation("RepositoryOwner")
+  memberships       RepositoryMember[]
+  annotations       Annotation[]
 }
 
 model Repository {
-  id          String   @id @default(uuid())
+  id          String             @id @default(uuid())
   name        String
-  slug        String   @unique // tracking format: "owner/repo-name"
+  slug        String             @unique
   description String?
-  isPrivate   Boolean  @default(false)
-  gitPath     String   // Can be kept for backward compatibility or left blank for remote git
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  gitPath     String             // Kept for workspace compatibility passes
+  isPrivate   Boolean            @default(false)
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
   
   ownerId     String
-  owner       User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  owner       User               @relation("RepositoryOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  members     RepositoryMember[]
   commits     Commit[]
+}
+
+model RepositoryMember {
+  id           String     @id @default(uuid())
+  role         String     // "ADMIN" | "DEVELOPER" | "REVIEWER"
+  joinedAt     DateTime   @default(now())
+  
+  userId       String
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  repositoryId String
+  repository   Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, repositoryId])
 }
 
 model Commit {
   id           String   @id @default(uuid())
-  hash         String   // Git commit hash
+  hash         String   
   message      String
   authorName   String
   authorEmail  String
@@ -53,9 +69,9 @@ model Annotation {
   id         String   @id @default(uuid())
   commitHash String
   filePath   String
-  layerId    String   // e.g. "Top", "Bottom", "Schematic"
-  x          Float    // native board coordinate X
-  y          Float    // native board coordinate Y
+  layerId    String   // e.g., "Top", "Bottom", "Schematic"
+  x          Float    // absolute layout axis point X
+  y          Float    // absolute layout axis point Y
   content    String
   resolved   Boolean  @default(false)
   createdAt  DateTime @default(now())
