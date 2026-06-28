@@ -21,6 +21,7 @@ import DiffCanvas from '@/components/diff-canvas';
 import LayerPanel from '@/components/LayerPanel';
 import Link from 'next/link';
 import {
+  PanelLeft,
   GitBranch,
   GitCommit,
   Layers,
@@ -74,6 +75,58 @@ export default function Dashboard() {
   const [isAddingAnnotation, setIsAddingAnnotation] = useState<boolean>(false);
   const [pendingCoords, setPendingCoords] = useState<{ x: number; y: number } | null>(null);
   const [commentText, setCommentText] = useState<string>('');
+
+  // Sidebar Toggling & Animation States
+  const [isSidebarVisible, setIsSidebarVisible] = useState<boolean>(true);
+
+  // Keyboard shortcut listener (Ctrl+B / Cmd+B) to toggle sidebar
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        setIsSidebarVisible(prev => !prev);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  // Persist sidebar state per repository slug
+  useEffect(() => {
+    if (selectedRepo?.slug) {
+      const persisted = localStorage.getItem(`sidebar-visible-${selectedRepo.slug}`);
+      if (persisted !== null) {
+        setIsSidebarVisible(persisted === 'true');
+      } else {
+        setIsSidebarVisible(true);
+      }
+    }
+  }, [selectedRepo]);
+
+  const toggleSidebar = () => {
+    setIsSidebarVisible(prev => {
+      const next = !prev;
+      if (selectedRepo?.slug) {
+        localStorage.setItem(`sidebar-visible-${selectedRepo.slug}`, String(next));
+      }
+      return next;
+    });
+  };
+
+  // Dispatch continuous resize events during the 300ms transition to keep canvas fluid
+  useEffect(() => {
+    window.dispatchEvent(new Event('resize'));
+    let frameId: number;
+    const startTime = performance.now();
+    const tick = () => {
+      window.dispatchEvent(new Event('resize'));
+      if (performance.now() - startTime < 350) {
+        frameId = requestAnimationFrame(tick);
+      }
+    };
+    frameId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frameId);
+  }, [isSidebarVisible]);
 
   // Collaborator States
   const [inviteEmail, setInviteEmail] = useState<string>('');
@@ -258,6 +311,14 @@ export default function Dashboard() {
     <div className="flex flex-col h-screen w-screen bg-[#080b13] text-slate-100 antialiased overflow-hidden">
       <header className="h-14 border-b border-slate-800 bg-slate-950/75 backdrop-blur-md px-6 flex items-center justify-between z-30">
         <div className="flex items-center gap-3">
+          <button
+            onClick={toggleSidebar}
+            title="Toggle Workspace Sidebar (Ctrl+B)"
+            aria-label="Toggle Workspace Sidebar"
+            className="p-1.5 hover:bg-slate-800 text-slate-400 hover:text-white rounded-lg transition-all"
+          >
+            <PanelLeft className="w-4 h-4" />
+          </button>
           <div className="h-8 w-8 rounded-lg bg-gradient-to-tr from-cyan-500 to-emerald-500 flex items-center justify-center font-bold text-slate-900">CL</div>
           <div>
             <span className="font-bold text-sm block">CADLAB.io</span>
@@ -302,7 +363,9 @@ export default function Dashboard() {
 
       <div className="flex flex-1 overflow-hidden">
         {/* Left Side Workspace Management Side Navigation */}
-        <aside className="w-80 border-r border-slate-900 bg-slate-950/40 flex flex-col shrink-0 overflow-y-auto">
+        <aside className={`border-slate-900 bg-slate-950/40 flex flex-col shrink-0 overflow-y-auto transition-all duration-300 ease-in-out ${
+          isSidebarVisible ? 'w-80 border-r opacity-100' : 'w-0 border-r-0 opacity-0 pointer-events-none'
+        }`}>
           <div className="p-4 border-b border-slate-900/60 flex flex-col gap-3">
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-bold text-slate-400 font-mono uppercase tracking-wider flex items-center gap-1.5">

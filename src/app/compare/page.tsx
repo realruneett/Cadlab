@@ -12,7 +12,8 @@ import {
   Globe,
   Database,
   Lock,
-  ArrowRightLeft
+  ArrowRightLeft,
+  PanelLeft
 } from 'lucide-react';
 
 const Github = (props: React.SVGProps<SVGSVGElement>) => (
@@ -68,6 +69,60 @@ export default function ComparePage() {
   const [crlfToLf, setCrlfToLf] = useState(true);
   const [additionsCount, setAdditionsCount] = useState(0);
   const [deletionsCount, setDeletionsCount] = useState(0);
+
+  // Sidebar Toggling & Animation States
+  const [isSidebarVisible, setIsSidebarVisible] = useState<boolean>(true);
+
+  // Keyboard shortcut listener (Ctrl+B / Cmd+B) to toggle sidebar
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        setIsSidebarVisible(prev => !prev);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  // Persist sidebar state per repository slug (or local mode)
+  useEffect(() => {
+    const key = mode === 'github' && selectedRepoSlug 
+      ? `sidebar-visible-${selectedRepoSlug}` 
+      : 'sidebar-visible-local';
+    const persisted = localStorage.getItem(key);
+    if (persisted !== null) {
+      setIsSidebarVisible(persisted === 'true');
+    } else {
+      setIsSidebarVisible(true);
+    }
+  }, [mode, selectedRepoSlug]);
+
+  const toggleSidebar = () => {
+    setIsSidebarVisible(prev => {
+      const next = !prev;
+      const key = mode === 'github' && selectedRepoSlug 
+        ? `sidebar-visible-${selectedRepoSlug}` 
+        : 'sidebar-visible-local';
+      localStorage.setItem(key, String(next));
+      return next;
+    });
+  };
+
+  // Dispatch continuous resize events during the 300ms transition to keep canvas fluid
+  useEffect(() => {
+    window.dispatchEvent(new Event('resize'));
+    let frameId: number;
+    const startTime = performance.now();
+    const tick = () => {
+      window.dispatchEvent(new Event('resize'));
+      if (performance.now() - startTime < 350) {
+        frameId = requestAnimationFrame(tick);
+      }
+    };
+    frameId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frameId);
+  }, [isSidebarVisible]);
 
   // 1. Load User Session and OAuth Token
   useEffect(() => {
@@ -359,6 +414,14 @@ export default function ComparePage() {
           >
             <ArrowLeft className="w-4 h-4" />
           </Link>
+          <button
+            onClick={toggleSidebar}
+            title="Toggle Sidebar (Ctrl+B)"
+            aria-label="Toggle Sidebar"
+            className="p-1.5 hover:bg-slate-800 text-slate-400 hover:text-white rounded-lg transition-all"
+          >
+            <PanelLeft className="w-4 h-4" />
+          </button>
           <div>
             <h1 className="text-sm font-bold bg-gradient-to-r from-blue-400 to-indigo-400 bg-clip-text text-transparent">
               Compare Studio
@@ -389,10 +452,12 @@ export default function ComparePage() {
       </header>
 
       {/* Main Workspace Area */}
-      <main className="flex-1 flex overflow-hidden p-6 gap-6">
+      <main className="flex-1 flex overflow-hidden p-6">
         
         {/* SIDEBAR Panel: File Lists, Fetchers, & Configs */}
-        <aside className="w-80 shrink-0 flex flex-col gap-4 overflow-hidden h-full">
+        <aside className={`shrink-0 flex flex-col gap-4 overflow-hidden h-full transition-all duration-300 ease-in-out ${
+          isSidebarVisible ? 'w-80 opacity-100 mr-6' : 'w-0 opacity-0 pointer-events-none mr-0'
+        }`}>
           
           {/* Tab Selector */}
           <div className="flex bg-slate-950/40 p-1 border border-slate-800/80 rounded-xl">
