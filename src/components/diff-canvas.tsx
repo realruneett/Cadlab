@@ -453,8 +453,13 @@ export default function DiffCanvas({
       {/* Floating Hover Tooltip */}
       {hoverInfo && (
         <div
+          ref={(el) => {
+            if (el) {
+              el.style.left = `${hoverInfo.x + 15}px`;
+              el.style.top = `${hoverInfo.y + 15}px`;
+            }
+          }}
           className="absolute z-20 pointer-events-none bg-slate-900/95 backdrop-blur-md border border-slate-700 px-3 py-2 rounded-lg text-xs shadow-2xl transition-all max-w-[250px]"
-          style={{ left: hoverInfo.x + 15, top: hoverInfo.y + 15 }}
         >
           <div className="font-bold text-slate-100">{hoverInfo.text}</div>
           {hoverInfo.subText && <div className="text-[10px] text-slate-400 mt-0.5">{hoverInfo.subText}</div>}

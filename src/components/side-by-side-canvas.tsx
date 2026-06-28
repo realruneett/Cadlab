@@ -5,6 +5,7 @@ import { Point } from '../lib/parsers/kicad/pcbParser';
 import { toScreen, toNative, fitBounds, ViewportTransform } from '../lib/canvas/coordinate-translator';
 import { DiffedHardwareData } from '../lib/diff/diffEngine';
 import { ZoomIn, ZoomOut, Maximize } from 'lucide-react';
+import { getLayerColor } from '../lib/layers/layer-colors';
 
 interface SideBySideCanvasProps {
   diffData: DiffedHardwareData;
@@ -60,11 +61,7 @@ export default function SideBySideCanvas({
     return visibleLayers.includes(layerName) || layerName === 'MultiLayer';
   };
 
-  const getLayerColor = (layerName: string) => {
-    if (layerName === 'F.Cu' || layerName === 'Top') return '#ef4444'; // Red top layer
-    if (layerName === 'B.Cu' || layerName === 'Bottom') return '#3b82f6'; // Blue bottom layer
-    return '#a855f7'; // purple other
-  };
+
 
   const getDiffStyle = (status: 'added' | 'deleted' | 'modified' | 'unchanged', isNewRevision: boolean) => {
     if (status === 'unchanged') {
@@ -425,11 +422,13 @@ export default function SideBySideCanvas({
       {/* Floating Hover Tooltip */}
       {hoverInfo && (
         <div
-          className="absolute z-20 pointer-events-none bg-slate-900/95 backdrop-blur-md border border-slate-700 px-3 py-2 rounded-lg text-xs shadow-2xl transition-all max-w-[250px]"
-          style={{
-            left: hoverInfo.side === 'left' ? hoverInfo.x + 15 : hoverInfo.x + canvasWidth + 25,
-            top: hoverInfo.y + 15,
+          ref={(el) => {
+            if (el) {
+              el.style.left = `${hoverInfo.side === 'left' ? hoverInfo.x + 15 : hoverInfo.x + canvasWidth + 25}px`;
+              el.style.top = `${hoverInfo.y + 15}px`;
+            }
           }}
+          className="absolute z-20 pointer-events-none bg-slate-900/95 backdrop-blur-md border border-slate-700 px-3 py-2 rounded-lg text-xs shadow-2xl transition-all max-w-[250px]"
         >
           <div className="font-bold text-slate-100">{hoverInfo.text}</div>
           {hoverInfo.subText && <div className="text-[10px] text-slate-400 mt-0.5">{hoverInfo.subText}</div>}
