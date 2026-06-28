@@ -255,3 +255,29 @@ export function getOrderedLayers(layers: string[]): string[] {
     return za - zb;
   });
 }
+
+// Diff highlight colors for change preview mode
+export const DIFF_HIGHLIGHT = {
+  added:   { color: '#28A745', rgba: 'rgba(40,167,69,0.6)',   style: 'solid-glow' },
+  removed: { color: '#D9534F', rgba: 'rgba(217,83,79,0.6)',   style: 'dashed-outline' },
+  modified:{ color: '#F0AD4E', rgba: 'rgba(240,173,78,0.6)',  style: 'pulse-outline' },
+} as const;
+
+// Net coloring for hover (when no change reference)
+export const NET_COLORS: Record<string, string> = {
+  default: '#3498DB',
+  GND: '#2ECC71',
+  VCC: '#E74C3C',
+  VDD: '#E74C3C',
+  VSS: '#2ECC71',
+  AGND: '#2ECC71',
+  DVDD: '#E74C3C',
+};
+
+export function getNetColor(netName: string): string {
+  const upper = netName.toUpperCase();
+  for (const [key, color] of Object.entries(NET_COLORS)) {
+    if (upper.includes(key)) return color;
+  }
+  return NET_COLORS.default;
+}

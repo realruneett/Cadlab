@@ -1,21 +1,21 @@
 "use client";
 
-// src/components/hardware-canvas.tsx
-// UPDATED — Universal Layer Color System Integration
-
-import { useRef, useEffect, useState } from 'react';
+import { useRef, useEffect, useState, useCallback } from 'react';
 import { Point, PCBData } from '../lib/parsers/kicad/pcbParser';
 import { SchematicData } from '../lib/parsers/kicad/schParser';
 import { ViewportTransform, toScreen, toNative, fitBounds } from '../lib/canvas/coordinate-translator';
-import { resolveLayerStyle, getOrderedLayers } from '../lib/layers/layer-colors';
-import { RotateCw, MessageSquare } from 'lucide-react';
+import { resolveLayerStyle, getOrderedLayers, DIFF_HIGHLIGHT, getNetColor } from '../lib/layers/layer-colors';
+import { PreviewChange } from '../hooks/usePreview';
 
 interface HardwareCanvasProps {
   data: PCBData | SchematicData;
   visibleLayers?: string[];
+  layerOpacities?: Record<string, number>;
+  highlightedChange?: PreviewChange | null;
   annotations?: any[];
   selectedAnnotationId?: string | null;
   reviewMode?: boolean;
+  previewMode?: boolean;
   onAddAnnotation?: (x: number, y: number) => void;
   onSelectAnnotation?: (id: string) => void;
 }
@@ -23,9 +23,12 @@ interface HardwareCanvasProps {
 export default function HardwareCanvas({
   data,
   visibleLayers = [],
+  layerOpacities = {},
+  highlightedChange = null,
   annotations = [],
   selectedAnnotationId = null,
   reviewMode = false,
+  previewMode = false,
   onAddAnnotation,
   onSelectAnnotation
 }: HardwareCanvasProps) {
@@ -37,8 +40,9 @@ export default function HardwareCanvas({
   const [isPanning, setIsPanning] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
   const [hoverInfo, setHoverInfo] = useState<{ x: number; y: number; text: string; subText?: string } | null>(null);
+  const [hoveredNet, setHoveredNet] = useState<string | null>(null);
 
-  // Resize handler
+  // Resize observer to auto-adapt dimensions
   useEffect(() => {
     if (!containerRef.current) return;
     const resizeObserver = new ResizeObserver((entries) => {
@@ -51,7 +55,7 @@ export default function HardwareCanvas({
     return () => resizeObserver.disconnect();
   }, []);
 
-  // Fit bounds initially
+  // Center and fit canvas bounds when design file changes
   useEffect(() => {
     if (dimensions.width > 0 && dimensions.height > 0 && data) {
       const fit = fitBounds(data.bounds, dimensions.width, dimensions.height);
@@ -59,14 +63,39 @@ export default function HardwareCanvas({
     }
   }, [data, dimensions.width, dimensions.height]);
 
-  // Main Draw Loop — UNIVERSAL LAYER SYSTEM
+  // Bind keydown for F key shortcut (Fit Bounds)
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'f' || e.key === 'F') {
+        if (data && dimensions.width > 0) {
+          const fit = fitBounds(data.bounds, dimensions.width, dimensions.height);
+          setTransform(fit);
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [data, dimensions]);
+
+  const isInHighlightBounds = useCallback((x: number, y: number): boolean => {
+    if (!highlightedChange) return false;
+    const b = highlightedChange.bounds;
+    return x >= b.xMin && x <= b.xMax && y >= b.yMin && y <= b.yMax;
+  }, [highlightedChange]);
+
+  const getHighlightColor = useCallback((): { color: string; rgba: string; style: string } | null => {
+    if (!highlightedChange) return null;
+    return DIFF_HIGHLIGHT[highlightedChange.type];
+  }, [highlightedChange]);
+
+  // Main canvas draw loop
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Clear background (dark PCB substrate)
+    // Substrate background
     ctx.fillStyle = '#0f172a';
     ctx.fillRect(0, 0, dimensions.width, dimensions.height);
 
@@ -78,28 +107,23 @@ export default function HardwareCanvas({
     const gridOffsetY = transform.offsetY % gridSize;
 
     for (let x = gridOffsetX; x < dimensions.width; x += gridSize) {
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, dimensions.height);
-      ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, dimensions.height); ctx.stroke();
     }
     for (let y = gridOffsetY; y < dimensions.height; y += gridSize) {
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(dimensions.width, y);
-      ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(dimensions.width, y); ctx.stroke();
     }
 
-    // Layer visibility check
     const isLayerVisible = (layerName: string): boolean => {
       if (data.type === 'schematic') return true;
       if (visibleLayers.length === 0) return true;
       return visibleLayers.includes(layerName) || layerName === 'MultiLayer';
     };
 
+    const getOpacity = (layerName: string): number => {
+      return layerOpacities[layerName] ?? resolveLayerStyle(layerName).opacity ?? 1;
+    };
+
     if (data.type === 'pcb') {
-      // === UNIVERSAL LAYER RENDERING WITH Z-INDEX ===
-      // Sort all renderable entities by their layer's zIndex
       const renderQueue: Array<{
         type: 'trace' | 'via' | 'pad' | 'component' | 'outline';
         layer: string;
@@ -107,14 +131,12 @@ export default function HardwareCanvas({
         data: any;
       }> = [];
 
-      // Queue traces
       for (const t of data.traces) {
         if (!isLayerVisible(t.layer)) continue;
         const style = resolveLayerStyle(t.layer);
         renderQueue.push({ type: 'trace', layer: t.layer, zIndex: style.zIndex, data: t });
       }
 
-      // Queue vias
       for (const v of data.vias) {
         const isViaVisible = v.layers.some(l => isLayerVisible(l));
         if (!isViaVisible) continue;
@@ -122,48 +144,41 @@ export default function HardwareCanvas({
         renderQueue.push({ type: 'via', layer: 'Vias', zIndex: style.zIndex, data: v });
       }
 
-      // Queue pads (grouped by component for efficiency, but sorted by layer)
       for (const comp of data.components) {
         if (!isLayerVisible(comp.layer)) continue;
         for (const pad of comp.pads) {
           if (!isLayerVisible(pad.layer)) continue;
           const style = resolveLayerStyle(pad.layer);
-          renderQueue.push({ 
-            type: 'pad', 
-            layer: pad.layer, 
-            zIndex: style.zIndex, 
-            data: { pad, comp } 
-          });
+          renderQueue.push({ type: 'pad', layer: pad.layer, zIndex: style.zIndex, data: { pad, comp } });
         }
-        // Component origin marker
         const compStyle = resolveLayerStyle(comp.layer);
-        renderQueue.push({
-          type: 'component',
-          layer: comp.layer,
-          zIndex: compStyle.zIndex + 0.5, // slightly above pads
-          data: comp
-        });
+        renderQueue.push({ type: 'component', layer: comp.layer, zIndex: compStyle.zIndex + 0.5, data: comp });
       }
 
-      // Sort by zIndex (lower = drawn first / below)
       renderQueue.sort((a, b) => a.zIndex - b.zIndex);
 
-      // Execute render queue
       for (const item of renderQueue) {
         switch (item.type) {
           case 'trace': {
             const t = item.data;
             const style = resolveLayerStyle(t.layer);
-            
+            const opacity = getOpacity(t.layer);
+            const isHighlighted = highlightedChange && highlightedChange.layerIds.includes(t.layer) && 
+              t.points.some((p: Point) => isInHighlightBounds(p.x, p.y));
+            const hl = isHighlighted ? getHighlightColor() : null;
+
             ctx.save();
-            ctx.strokeStyle = style.color;
-            ctx.globalAlpha = style.opacity ?? 1.0;
+            ctx.strokeStyle = hl ? hl.color : style.color;
+            ctx.globalAlpha = hl ? 0.9 : opacity;
             ctx.lineWidth = Math.max(0.5, t.width * transform.scale);
             ctx.lineCap = 'round';
             ctx.lineJoin = 'round';
             
-            if (style.strokeDash) {
+            if (style.strokeDash && !hl) {
               ctx.setLineDash(style.strokeDash.map(d => d * transform.scale));
+            }
+            if (hl?.style === 'dashed-outline') {
+              ctx.setLineDash([6, 4].map(d => d * transform.scale));
             }
 
             ctx.beginPath();
@@ -174,6 +189,13 @@ export default function HardwareCanvas({
               ctx.lineTo(pt.x, pt.y);
             }
             ctx.stroke();
+
+            if (hl && (hl.style === 'solid-glow' || hl.style === 'pulse-outline')) {
+              ctx.shadowColor = hl.color;
+              ctx.shadowBlur = 8 * transform.scale;
+              ctx.stroke();
+              ctx.shadowBlur = 0;
+            }
             ctx.restore();
             break;
           }
@@ -181,22 +203,31 @@ export default function HardwareCanvas({
           case 'via': {
             const v = item.data;
             const style = resolveLayerStyle('Vias');
+            const opacity = getOpacity('Vias');
+            const isHighlighted = highlightedChange && isInHighlightBounds(v.x, v.y);
+            const hl = isHighlighted ? getHighlightColor() : null;
             const screenPos = toScreen(v.x, v.y, transform);
-            const radius = (v.diameter / 2) * transform.scale;
-            const drillRadius = (v.drill / 2) * transform.scale;
+            const radius = Math.max(0.5, (v.diameter / 2) * transform.scale);
+            const drillRadius = Math.max(0.3, (v.drill / 2) * transform.scale);
 
             ctx.save();
-            // Outer copper ring with layer color
-            ctx.fillStyle = style.color;
-            ctx.globalAlpha = style.opacity ?? 1.0;
+            ctx.fillStyle = hl ? hl.color : style.color;
+            ctx.globalAlpha = hl ? 0.9 : opacity;
             ctx.beginPath();
-            ctx.arc(screenPos.x, screenPos.y, Math.max(0.5, radius), 0, Math.PI * 2);
+            ctx.arc(screenPos.x, screenPos.y, radius, 0, Math.PI * 2);
             ctx.fill();
 
-            // Inner hole (substrate color)
+            if (hl?.style === 'solid-glow') {
+              ctx.shadowColor = hl.color;
+              ctx.shadowBlur = 10 * transform.scale;
+              ctx.fill();
+              ctx.shadowBlur = 0;
+            }
+
             ctx.fillStyle = '#0f172a';
+            ctx.globalAlpha = 1;
             ctx.beginPath();
-            ctx.arc(screenPos.x, screenPos.y, Math.max(0.3, drillRadius), 0, Math.PI * 2);
+            ctx.arc(screenPos.x, screenPos.y, drillRadius, 0, Math.PI * 2);
             ctx.fill();
             ctx.restore();
             break;
@@ -205,14 +236,18 @@ export default function HardwareCanvas({
           case 'pad': {
             const { pad, comp } = item.data;
             const style = resolveLayerStyle(pad.layer);
+            const opacity = getOpacity(pad.layer);
+            const isHighlighted = highlightedChange && highlightedChange.layerIds.includes(pad.layer) &&
+              isInHighlightBounds(pad.x, pad.y);
+            const hl = isHighlighted ? getHighlightColor() : null;
             const sp = toScreen(pad.x, pad.y, transform);
             const pw = Math.max(0.5, pad.width * transform.scale);
             const ph = Math.max(0.5, pad.height * transform.scale);
 
             ctx.save();
-            ctx.fillStyle = style.color;
-            ctx.globalAlpha = style.opacity ?? 1.0;
-            
+            ctx.fillStyle = hl ? hl.color : style.color;
+            ctx.globalAlpha = hl ? 0.9 : opacity;
+
             if (pad.shape === 'circle' || pad.shape === 'round') {
               ctx.beginPath();
               ctx.arc(sp.x, sp.y, Math.max(pw, ph) / 2, 0, Math.PI * 2);
@@ -221,21 +256,33 @@ export default function HardwareCanvas({
               ctx.fillRect(sp.x - pw / 2, sp.y - ph / 2, pw, ph);
             }
 
-            // Drill hole for through-hole
+            if (hl?.style === 'solid-glow') {
+              ctx.shadowColor = hl.color;
+              ctx.shadowBlur = 8 * transform.scale;
+              if (pad.shape === 'circle' || pad.shape === 'round') {
+                ctx.beginPath();
+                ctx.arc(sp.x, sp.y, Math.max(pw, ph) / 2, 0, Math.PI * 2);
+                ctx.fill();
+              } else {
+                ctx.fillRect(sp.x - pw / 2, sp.y - ph / 2, pw, ph);
+              }
+              ctx.shadowBlur = 0;
+            }
+
             if (pad.drill > 0) {
               ctx.fillStyle = '#0f172a';
+              ctx.globalAlpha = 1;
               ctx.beginPath();
               ctx.arc(sp.x, sp.y, Math.max(0.3, (pad.drill / 2) * transform.scale), 0, Math.PI * 2);
               ctx.fill();
             }
 
-            // Pad label at high zoom
             if (transform.scale > 8) {
               ctx.fillStyle = '#ffffff';
               ctx.font = `${Math.max(8, Math.min(12, transform.scale))}px sans-serif`;
               ctx.textAlign = 'center';
               ctx.textBaseline = 'middle';
-              ctx.globalAlpha = 1.0;
+              ctx.globalAlpha = 1;
               ctx.fillText(pad.name, sp.x, sp.y);
             }
             ctx.restore();
@@ -246,9 +293,8 @@ export default function HardwareCanvas({
             const comp = item.data;
             const sc = toScreen(comp.x, comp.y, transform);
             
-            // Origin crosshair
             ctx.save();
-            ctx.strokeStyle = '#facc15'; // Yellow anchor
+            ctx.strokeStyle = '#facc15';
             ctx.lineWidth = 1;
             const crossSize = 3 * transform.scale;
             ctx.beginPath();
@@ -258,12 +304,11 @@ export default function HardwareCanvas({
             ctx.lineTo(sc.x, sc.y + crossSize);
             ctx.stroke();
 
-            // Designator text
             if (transform.scale > 2) {
               ctx.fillStyle = '#e2e8f0';
               ctx.font = '10px monospace';
               ctx.textAlign = 'center';
-              ctx.globalAlpha = 1.0;
+              ctx.globalAlpha = 1;
               ctx.fillText(comp.designator, sc.x, sc.y - 2.5 * transform.scale);
             }
             ctx.restore();
@@ -272,8 +317,6 @@ export default function HardwareCanvas({
         }
       }
 
-      // === BOARD OUTLINE (Always on top of substrate, below copper) ===
-      // Draw edge cuts if present in traces
       const edgeCuts = data.traces.filter(t => {
         const l = t.layer.toLowerCase();
         return l === 'edge.cuts' || l === 'dimension' || l === 'outline';
@@ -299,9 +342,28 @@ export default function HardwareCanvas({
         ctx.restore();
       }
 
+      if (hoveredNet && !highlightedChange) {
+        const netColor = getNetColor(hoveredNet);
+        ctx.save();
+        ctx.strokeStyle = netColor;
+        ctx.globalAlpha = 0.3;
+        ctx.lineWidth = 3;
+        for (const t of data.traces) {
+          if (t.net !== hoveredNet) continue;
+          if (!isLayerVisible(t.layer)) continue;
+          ctx.beginPath();
+          const p0 = toScreen(t.points[0].x, t.points[0].y, transform);
+          ctx.moveTo(p0.x, p0.y);
+          for (let idx = 1; idx < t.points.length; idx++) {
+            const pt = toScreen(t.points[idx].x, t.points[idx].y, transform);
+            ctx.lineTo(pt.x, pt.y);
+          }
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
     } else {
-      // === SCHEMATIC RENDERING ===
-      // (Keep existing schematic logic, but with better colors)
       for (const net of data.nets) {
         ctx.save();
         ctx.strokeStyle = '#06b6d4';
@@ -367,7 +429,6 @@ export default function HardwareCanvas({
       }
     }
 
-    // === ANNOTATIONS ===
     for (const ann of annotations) {
       if (ann.resolved) continue;
       const sp = toScreen(ann.x, ann.y, transform);
@@ -400,9 +461,9 @@ export default function HardwareCanvas({
       ctx.fillText("💬", sp.x, sp.y - 0.5);
       ctx.restore();
     }
-  }, [data, transform, visibleLayers, annotations, selectedAnnotationId, dimensions]);
+  }, [data, transform, visibleLayers, layerOpacities, highlightedChange, hoveredNet, annotations, selectedAnnotationId, dimensions]);
 
-  // Mouse handlers (unchanged logic, preserved for brevity)
+  // Click & Drag panning/adding annotation handlers
   const handleMouseDown = (e: React.MouseEvent) => {
     if (e.button === 0) {
       if (reviewMode) {
@@ -447,9 +508,16 @@ export default function HardwareCanvas({
     let matchedText = "";
     let matchedSubText = "";
 
+    const isLayerVisible = (layerName: string): boolean => {
+      if (data.type === 'schematic') return true;
+      if (visibleLayers.length === 0) return true;
+      return visibleLayers.includes(layerName) || layerName === 'MultiLayer';
+    };
+
     if (data.type === 'pcb') {
       for (const comp of data.components) {
         for (const pad of comp.pads) {
+          if (!isLayerVisible(pad.layer)) continue;
           const pd = Math.hypot(pad.x - native.x, pad.y - native.y);
           if (pd < Math.max(pad.width, pad.height) / 2) {
             matchedText = `Pad: ${comp.designator}.${pad.name}`;
@@ -462,6 +530,7 @@ export default function HardwareCanvas({
 
       if (!matchedText) {
         for (const comp of data.components) {
+          if (!isLayerVisible(comp.layer)) continue;
           const d = Math.hypot(comp.x - native.x, comp.y - native.y);
           if (d < 4.0) {
             matchedText = `Component: ${comp.designator}`;
@@ -473,6 +542,7 @@ export default function HardwareCanvas({
 
       if (!matchedText) {
         for (const t of data.traces) {
+          if (!isLayerVisible(t.layer)) continue;
           for (let k = 0; k < t.points.length - 1; k++) {
             const p1 = t.points[k];
             const p2 = t.points[k + 1];
@@ -480,11 +550,15 @@ export default function HardwareCanvas({
             if (d < t.width / 2 + 0.3) {
               matchedText = `Net: ${t.net}`;
               matchedSubText = `Layer: ${t.layer} | Width: ${t.width}mm | Color: ${resolveLayerStyle(t.layer).color}`;
+              setHoveredNet(t.net);
               break;
             }
           }
           if (matchedText) break;
         }
+      }
+      if (!matchedText) {
+        setHoveredNet(null);
       }
     } else {
       for (const comp of data.components) {
@@ -544,19 +618,21 @@ export default function HardwareCanvas({
   return (
     <div ref={containerRef} className="relative w-full h-full overflow-hidden bg-slate-900 rounded-lg">
       {/* Top Floating Controls Bar */}
-      <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-3 bg-slate-800/90 backdrop-blur-sm px-4 py-2 rounded-full border border-slate-700 shadow-lg">
-        <span className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
-          {data.type.toUpperCase()} View
-        </span>
-        <div className="w-px h-4 bg-slate-600" />
-        <button onClick={() => handleZoom('in')} className="text-slate-300 hover:text-white transition-colors text-sm">+</button>
-        <span className="text-xs text-slate-400 min-w-[3rem] text-center">
-          {Math.round(transform.scale * 100)}%
-        </span>
-        <button onClick={() => handleZoom('out')} className="text-slate-300 hover:text-white transition-colors text-sm">−</button>
-        <div className="w-px h-4 bg-slate-600" />
-        <button onClick={handleReset} className="text-xs text-slate-300 hover:text-white transition-colors">Fit</button>
-      </div>
+      {!previewMode && (
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-3 bg-slate-800/90 backdrop-blur-sm px-4 py-2 rounded-full border border-slate-700 shadow-lg">
+          <span className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
+            {data.type.toUpperCase()} View
+          </span>
+          <div className="w-px h-4 bg-slate-600" />
+          <button onClick={() => handleZoom('in')} className="text-slate-300 hover:text-white transition-colors text-sm cursor-pointer">+</button>
+          <span className="text-xs text-slate-400 min-w-[3rem] text-center">
+            {Math.round(transform.scale * 100)}%
+          </span>
+          <button onClick={() => handleZoom('out')} className="text-slate-300 hover:text-white transition-colors text-sm cursor-pointer">−</button>
+          <div className="w-px h-4 bg-slate-600" />
+          <button onClick={handleReset} className="text-xs text-slate-300 hover:text-white transition-colors cursor-pointer">Fit</button>
+        </div>
+      )}
 
       {/* Hover Tooltip */}
       {hoverInfo && (
@@ -581,7 +657,7 @@ export default function HardwareCanvas({
         ref={canvasRef}
         width={dimensions.width}
         height={dimensions.height}
-        className="block cursor-crosshair"
+        className="block cursor-crosshair w-full h-full"
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}

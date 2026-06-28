@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useMemo } from 'react';
-import { Search, FileText, FileCode, Binary, Trash2, ArrowLeftRight, HelpCircle } from 'lucide-react';
+import { Search, FileText, FileCode, Binary, Trash2, ArrowLeftRight, HelpCircle, Eye } from 'lucide-react';
 import { FileEntry } from '@/utils/fileUtils';
 
 interface FileListProps {
@@ -12,6 +12,7 @@ interface FileListProps {
   onSelectRight: (file: FileEntry | null) => void;
   onRemoveFile?: (index: number) => void;
   onClearAll?: () => void;
+  onPreviewFile?: (file: FileEntry) => void;
 }
 
 export default function FileList({
@@ -22,6 +23,7 @@ export default function FileList({
   onSelectRight,
   onRemoveFile,
   onClearAll,
+  onPreviewFile,
 }: FileListProps) {
   const [search, setSearch] = useState('');
   const [selectedExtension, setSelectedExtension] = useState<string>('all');
@@ -234,7 +236,16 @@ export default function FileList({
                   </div>
 
                   {/* Quick Select Actions */}
-                  <div className="flex gap-1 shrink-0 ml-2">
+                  <div className="flex gap-1 shrink-0 ml-2 items-center">
+                    {onPreviewFile && (
+                      <button
+                        onClick={() => onPreviewFile(file)}
+                        className="p-1 hover:bg-slate-800 rounded opacity-0 group-hover:opacity-100 transition-all text-slate-400 hover:text-slate-200 cursor-pointer"
+                        title="Preview File"
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                     <button
                       onClick={() => onSelectLeft(isLeft ? null : file)}
                       className={`px-2 py-1 text-xs font-semibold rounded transition-all cursor-pointer ${

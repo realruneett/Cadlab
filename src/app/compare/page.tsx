@@ -32,6 +32,8 @@ import { FileEntry, readFileText } from '@/utils/fileUtils';
 import { listRepoFiles, fetchRepoFile } from '@/utils/github';
 import { parseHardwareFile } from '@/lib/parsers/parser';
 import { computeVisualDiff } from '@/lib/diff/diffEngine';
+import { usePreview } from '@/hooks/usePreview';
+import PreviewPanel from '@/components/PreviewPanel';
 
 export default function ComparePage() {
   // Authentication & GitHub states
@@ -59,6 +61,40 @@ export default function ComparePage() {
 
   // Core Comparison State
   const [selectedLeft, setSelectedLeft] = useState<FileEntry | null>(null);
+  
+  // Preview Drawer hook
+  const preview = usePreview();
+
+  const handlePreviewFile = async (file: FileEntry) => {
+    let content = file.content;
+    if (!content && file.file) {
+      try {
+        content = await readFileText(file.file);
+      } catch (err) {
+        console.error("Error reading local preview file content:", err);
+        alert("Failed to read local file content.");
+        return;
+      }
+    } else if (!content && !file.file) {
+      // GitHub file
+      try {
+        const res = await fetchRepoFile(
+          githubOwner,
+          githubRepo,
+          file.relativePath,
+          githubRef,
+          githubToken || undefined
+        );
+        content = res.content;
+      } catch (err: any) {
+        console.error("Failed to fetch file content for preview from GitHub:", err);
+        alert(`Failed to fetch file content for preview: ${err.message || 'Check path/permissions'}`);
+        return;
+      }
+    }
+    
+    preview.openPreview(file.relativePath, file.name, content);
+  };
   const [selectedRight, setSelectedRight] = useState<FileEntry | null>(null);
   const [leftContent, setLeftContent] = useState<string | null>(null);
   const [rightContent, setRightContent] = useState<string | null>(null);
@@ -503,6 +539,7 @@ export default function ComparePage() {
                     onSelectRight={handleSelectRight}
                     onRemoveFile={(idx) => setLocalFiles(prev => prev.filter((_, i) => i !== idx))}
                     onClearAll={() => setLocalFiles([])}
+                    onPreviewFile={handlePreviewFile}
                   />
                 </div>
               </div>
@@ -595,6 +632,7 @@ export default function ComparePage() {
                     selectedRight={selectedRight}
                     onSelectLeft={setSelectedLeft}
                     onSelectRight={handleSelectRight}
+                    onPreviewFile={handlePreviewFile}
                   />
                 </div>
               </div>
@@ -705,6 +743,22 @@ export default function ComparePage() {
         </section>
 
       </main>
+
+      <PreviewPanel
+        isOpen={preview.isOpen}
+        fileName={preview.fileName}
+        data={preview.data}
+        visibleLayers={preview.visibleLayers}
+        layerOpacities={preview.layerOpacities}
+        highlightedChange={preview.highlightedChange}
+        isLoading={preview.isLoading}
+        error={preview.error}
+        onClose={preview.closePreview}
+        onToggleLayer={preview.toggleLayer}
+        onSetOpacity={preview.setLayerOpacity}
+        onShowAllLayers={preview.showAllLayers}
+        onHideAllLayers={preview.hideAllLayers}
+      />
     </div>
   );
 }
