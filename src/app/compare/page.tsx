@@ -34,6 +34,7 @@ import { parseHardwareFile } from '@/lib/parsers/parser';
 import { computeVisualDiff } from '@/lib/diff/diffEngine';
 import { usePreview } from '@/hooks/usePreview';
 import PreviewPanel from '@/components/PreviewPanel';
+import InWorkspacePreview from '@/components/InWorkspacePreview';
 
 export default function ComparePage() {
   // Authentication & GitHub states
@@ -120,6 +121,25 @@ export default function ComparePage() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
+
+  // Keyboard shortcut listener to toggle preview (Shortcut P)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'p' || e.key === 'P') {
+        if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') {
+          return;
+        }
+        e.preventDefault();
+        if (preview.isOpen) {
+          preview.closePreview();
+        } else if (selectedLeft) {
+          handlePreviewFile(selectedLeft);
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [preview.isOpen, selectedLeft]);
 
   // Persist sidebar state per repository slug (or local mode)
   useEffect(() => {
@@ -715,8 +735,32 @@ export default function ComparePage() {
           )}
 
           {/* Side-by-Side Diff Component or Canvas */}
-          <div className="flex-1 min-h-[400px] flex overflow-hidden">
-            {canShowVisualDiff && viewType === 'visual' ? (
+          <div 
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={async (e) => {
+              e.preventDefault();
+              const files = e.dataTransfer.files;
+              if (files && files.length > 0) {
+                const file = files[0];
+                try {
+                  const content = await readFileText(file);
+                  preview.openPreview(file.name, file.name, content);
+                } catch (err) {
+                  console.error("Error reading dropped file:", err);
+                  alert("Failed to read dropped file.");
+                }
+              }
+            }}
+            className="flex-1 min-h-[400px] flex overflow-hidden"
+          >
+            {preview.isOpen ? (
+              <InWorkspacePreview
+                fileName={preview.fileName || ''}
+                data={preview.data}
+                onClose={preview.closePreview}
+                projectSlug={(mode === 'github' && selectedRepoSlug) ? selectedRepoSlug : 'local'}
+              />
+            ) : canShowVisualDiff && viewType === 'visual' ? (
               visualDiffError ? (
                 <div className="flex-1 glass-panel rounded-2xl flex flex-col items-center justify-center p-8 text-center min-h-[400px] border-slate-800/80 bg-slate-950/20">
                   <div className="text-red-500 font-semibold mb-2">Failed to render visual diff</div>
@@ -743,22 +787,6 @@ export default function ComparePage() {
         </section>
 
       </main>
-
-      <PreviewPanel
-        isOpen={preview.isOpen}
-        fileName={preview.fileName}
-        data={preview.data}
-        visibleLayers={preview.visibleLayers}
-        layerOpacities={preview.layerOpacities}
-        highlightedChange={preview.highlightedChange}
-        isLoading={preview.isLoading}
-        error={preview.error}
-        onClose={preview.closePreview}
-        onToggleLayer={preview.toggleLayer}
-        onSetOpacity={preview.setLayerOpacity}
-        onShowAllLayers={preview.showAllLayers}
-        onHideAllLayers={preview.hideAllLayers}
-      />
     </div>
   );
 }

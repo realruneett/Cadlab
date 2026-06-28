@@ -11,6 +11,7 @@ interface HardwareCanvasProps {
   data: PCBData | SchematicData;
   visibleLayers?: string[];
   layerOpacities?: Record<string, number>;
+  customColors?: Record<string, string>;
   highlightedChange?: PreviewChange | null;
   annotations?: any[];
   selectedAnnotationId?: string | null;
@@ -24,6 +25,7 @@ export default function HardwareCanvas({
   data,
   visibleLayers = [],
   layerOpacities = {},
+  customColors = {},
   highlightedChange = null,
   annotations = [],
   selectedAnnotationId = null,
@@ -41,6 +43,15 @@ export default function HardwareCanvas({
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
   const [hoverInfo, setHoverInfo] = useState<{ x: number; y: number; text: string; subText?: string } | null>(null);
   const [hoveredNet, setHoveredNet] = useState<string | null>(null);
+
+  // Helper to apply user custom color overrides
+  const getStyleWithOverride = useCallback((layerName: string) => {
+    const style = resolveLayerStyle(layerName);
+    if (customColors && customColors[layerName]) {
+      return { ...style, color: customColors[layerName] };
+    }
+    return style;
+  }, [customColors]);
 
   // Resize observer to auto-adapt dimensions
   useEffect(() => {
@@ -133,14 +144,14 @@ export default function HardwareCanvas({
 
       for (const t of data.traces) {
         if (!isLayerVisible(t.layer)) continue;
-        const style = resolveLayerStyle(t.layer);
+        const style = getStyleWithOverride(t.layer);
         renderQueue.push({ type: 'trace', layer: t.layer, zIndex: style.zIndex, data: t });
       }
 
       for (const v of data.vias) {
         const isViaVisible = v.layers.some(l => isLayerVisible(l));
         if (!isViaVisible) continue;
-        const style = resolveLayerStyle('Vias');
+        const style = getStyleWithOverride('Vias');
         renderQueue.push({ type: 'via', layer: 'Vias', zIndex: style.zIndex, data: v });
       }
 
@@ -148,10 +159,10 @@ export default function HardwareCanvas({
         if (!isLayerVisible(comp.layer)) continue;
         for (const pad of comp.pads) {
           if (!isLayerVisible(pad.layer)) continue;
-          const style = resolveLayerStyle(pad.layer);
+          const style = getStyleWithOverride(pad.layer);
           renderQueue.push({ type: 'pad', layer: pad.layer, zIndex: style.zIndex, data: { pad, comp } });
         }
-        const compStyle = resolveLayerStyle(comp.layer);
+        const compStyle = getStyleWithOverride(comp.layer);
         renderQueue.push({ type: 'component', layer: comp.layer, zIndex: compStyle.zIndex + 0.5, data: comp });
       }
 
@@ -161,7 +172,7 @@ export default function HardwareCanvas({
         switch (item.type) {
           case 'trace': {
             const t = item.data;
-            const style = resolveLayerStyle(t.layer);
+            const style = getStyleWithOverride(t.layer);
             const opacity = getOpacity(t.layer);
             const isHighlighted = highlightedChange && highlightedChange.layerIds.includes(t.layer) && 
               t.points.some((p: Point) => isInHighlightBounds(p.x, p.y));
@@ -202,7 +213,7 @@ export default function HardwareCanvas({
 
           case 'via': {
             const v = item.data;
-            const style = resolveLayerStyle('Vias');
+            const style = getStyleWithOverride('Vias');
             const opacity = getOpacity('Vias');
             const isHighlighted = highlightedChange && isInHighlightBounds(v.x, v.y);
             const hl = isHighlighted ? getHighlightColor() : null;
@@ -235,7 +246,7 @@ export default function HardwareCanvas({
 
           case 'pad': {
             const { pad, comp } = item.data;
-            const style = resolveLayerStyle(pad.layer);
+            const style = getStyleWithOverride(pad.layer);
             const opacity = getOpacity(pad.layer);
             const isHighlighted = highlightedChange && highlightedChange.layerIds.includes(pad.layer) &&
               isInHighlightBounds(pad.x, pad.y);
@@ -323,7 +334,7 @@ export default function HardwareCanvas({
       });
       
       if (edgeCuts.length > 0) {
-        const outlineStyle = resolveLayerStyle('Edge.Cuts');
+        const outlineStyle = getStyleWithOverride('Edge.Cuts');
         ctx.save();
         ctx.strokeStyle = outlineStyle.color;
         ctx.lineWidth = 2;
@@ -461,7 +472,7 @@ export default function HardwareCanvas({
       ctx.fillText("💬", sp.x, sp.y - 0.5);
       ctx.restore();
     }
-  }, [data, transform, visibleLayers, layerOpacities, highlightedChange, hoveredNet, annotations, selectedAnnotationId, dimensions]);
+  }, [data, transform, visibleLayers, layerOpacities, customColors, highlightedChange, hoveredNet, annotations, selectedAnnotationId, dimensions, getStyleWithOverride]);
 
   // Click & Drag panning/adding annotation handlers
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -521,7 +532,7 @@ export default function HardwareCanvas({
           const pd = Math.hypot(pad.x - native.x, pad.y - native.y);
           if (pd < Math.max(pad.width, pad.height) / 2) {
             matchedText = `Pad: ${comp.designator}.${pad.name}`;
-            matchedSubText = `Package: ${comp.footprint} | Layer: ${pad.layer} | Color: ${resolveLayerStyle(pad.layer).color}`;
+            matchedSubText = `Package: ${comp.footprint} | Layer: ${pad.layer} | Color: ${getStyleWithOverride(pad.layer).color}`;
             break;
           }
         }
@@ -549,7 +560,7 @@ export default function HardwareCanvas({
             const d = pointToSegmentDistance(native, p1, p2);
             if (d < t.width / 2 + 0.3) {
               matchedText = `Net: ${t.net}`;
-              matchedSubText = `Layer: ${t.layer} | Width: ${t.width}mm | Color: ${resolveLayerStyle(t.layer).color}`;
+              matchedSubText = `Layer: ${t.layer} | Width: ${t.width}mm | Color: ${getStyleWithOverride(t.layer).color}`;
               setHoveredNet(t.net);
               break;
             }
