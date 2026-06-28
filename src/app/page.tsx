@@ -12,7 +12,8 @@ import {
   resolveAnnotation,
   getCurrentUser,
   logoutUser,
-  addRepositoryCollaborator
+  addRepositoryCollaborator,
+  getFileContent
 } from './actions';
 import { ParsedHardwareData } from '@/lib/parsers/parser';
 import { DiffedHardwareData } from '@/lib/diff/diffEngine';
@@ -20,6 +21,8 @@ import HardwareCanvas from '@/components/hardware-canvas';
 import DiffCanvas from '@/components/diff-canvas';
 import LayerPanel from '@/components/LayerPanel';
 import Link from 'next/link';
+import { usePreview } from '@/hooks/usePreview';
+import PreviewPanel from '@/components/PreviewPanel';
 import {
   PanelLeft,
   GitBranch,
@@ -78,6 +81,23 @@ export default function Dashboard() {
 
   // Sidebar Toggling & Animation States
   const [isSidebarVisible, setIsSidebarVisible] = useState<boolean>(true);
+
+  // Preview hook and trigger
+  const preview = usePreview();
+
+  const handlePreviewFile = async (file: any) => {
+    if (!selectedRepo || !currentCommit) {
+      alert("Please select a repository and commit revision first.");
+      return;
+    }
+    try {
+      const content = await getFileContent(selectedRepo.id, currentCommit, file.path);
+      preview.openPreview(file.path, file.name, content);
+    } catch (err: any) {
+      console.error("Failed to load preview content:", err);
+      alert("Failed to load file content for preview.");
+    }
+  };
 
   // Keyboard shortcut listener (Ctrl+B / Cmd+B) to toggle sidebar
   useEffect(() => {
@@ -407,13 +427,26 @@ export default function Dashboard() {
             <div className="space-y-1 overflow-y-auto flex-1">
               {files.map(file => (
                 <div
-                  key={file.path} onClick={() => setSelectedFile(file.path)}
-                  className={`flex items-center gap-2 px-3 py-1.5 rounded-lg cursor-pointer text-xs font-mono border transition-all ${
+                  key={file.path}
+                  onClick={() => setSelectedFile(file.path)}
+                  className={`flex items-center justify-between gap-2 px-3 py-1.5 rounded-lg cursor-pointer text-xs font-mono border transition-all group ${
                     selectedFile === file.path ? 'bg-slate-900 border-slate-800 text-cyan-400 font-semibold' : 'border-transparent text-slate-400 hover:bg-slate-900/20'
                   }`}
                 >
-                  <FileCode className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-                  <span className="truncate">{file.name}</span>
+                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                    <FileCode className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                    <span className="truncate">{file.name}</span>
+                  </div>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handlePreviewFile(file);
+                    }}
+                    className="p-1 hover:bg-slate-800 rounded opacity-0 group-hover:opacity-100 transition-all text-slate-400 hover:text-slate-200 cursor-pointer"
+                    title="Preview File"
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                  </button>
                 </div>
               ))}
             </div>
@@ -588,6 +621,22 @@ export default function Dashboard() {
           </div>
         </aside>
       </div>
+
+      <PreviewPanel
+        isOpen={preview.isOpen}
+        fileName={preview.fileName}
+        data={preview.data}
+        visibleLayers={preview.visibleLayers}
+        layerOpacities={preview.layerOpacities}
+        highlightedChange={preview.highlightedChange}
+        isLoading={preview.isLoading}
+        error={preview.error}
+        onClose={preview.closePreview}
+        onToggleLayer={preview.toggleLayer}
+        onSetOpacity={preview.setLayerOpacity}
+        onShowAllLayers={preview.showAllLayers}
+        onHideAllLayers={preview.hideAllLayers}
+      />
     </div>
   );
 }

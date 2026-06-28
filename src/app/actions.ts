@@ -246,3 +246,12 @@ export async function resolveAnnotation(annotationId: string) {
     data: { resolved: true }
   });
 }
+
+export async function getFileContent(repositoryId: string, commitHash: string, filePath: string): Promise<string> {
+  const user = await getCurrentUser();
+  if (!user) throw new Error("Unauthorized");
+
+  const repo = await checkRepositoryAccess(repositoryId, user.id);
+  const token = await getGitHubToken();
+  return fetchRemoteContent(token, repo.slug, commitHash, filePath);
+}
