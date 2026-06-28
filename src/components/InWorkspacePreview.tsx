@@ -17,18 +17,22 @@ import { PCBData } from '../lib/parsers/kicad/pcbParser';
 import { SchematicData } from '../lib/parsers/kicad/schParser';
 import { getOrderedLayers, resolveLayerStyle } from '../lib/layers/layer-colors';
 
+import { usePreview } from '../hooks/usePreview';
+
 interface InWorkspacePreviewProps {
   fileName: string;
   data: PCBData | SchematicData | null;
   onClose: () => void;
   projectSlug: string;
+  preview?: ReturnType<typeof usePreview>;
 }
 
 export default function InWorkspacePreview({
   fileName,
   data,
   onClose,
-  projectSlug
+  projectSlug,
+  preview
 }: InWorkspacePreviewProps) {
   // --- Persistent Settings via LocalStorage ---
   const [layoutMode, setLayoutMode] = useState<'merged' | 'mirrored'>('merged');
@@ -36,6 +40,7 @@ export default function InWorkspacePreview({
   const [visibleLayers, setVisibleLayers] = useState<string[]>([]);
   const [layerOpacities, setLayerOpacities] = useState<Record<string, number>>({});
   const [customColors, setCustomColors] = useState<Record<string, string>>({});
+  const [isColorblind, setIsColorblind] = useState<boolean>(false);
   
   // Divider & guidelines
   const [dividerVisibleInMerged, setDividerVisibleInMerged] = useState(true);
@@ -68,6 +73,7 @@ export default function InWorkspacePreview({
     setOverrideDividerColor(loadLocal('overrideDividerColor', '#e11d48'));
     setOverrideAccentColor(loadLocal('overrideAccentColor', '#2563eb'));
     setOverrideOutlineColor(loadLocal('overrideOutlineColor', '#475569'));
+    setIsColorblind(localStorage.getItem(`project:${projectSlug}.isColorblindDiff`) === 'true');
 
     const savedLayers = loadLocal('visibleLayers', null);
     if (savedLayers) {
@@ -79,6 +85,16 @@ export default function InWorkspacePreview({
     setLayerOpacities(loadLocal('layerOpacities', {}));
     setCustomColors(loadLocal('customColors', {}));
   }, [projectSlug, data]);
+
+  // Listen for storage events to synchronize colorblind preference
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleStorage = () => {
+      setIsColorblind(localStorage.getItem(`project:${projectSlug}.isColorblindDiff`) === 'true');
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, [projectSlug]);
 
   // Save changes helper
   const updateSetting = useCallback((suffix: string, val: any) => {
@@ -133,47 +149,75 @@ export default function InWorkspacePreview({
     return getOrderedLayers(data.layers);
   }, [data]);
 
+  const activeVisibleLayers = preview ? preview.visibleLayers : visibleLayers;
+  const activeLayerOpacities = preview ? preview.layerOpacities : layerOpacities;
+  const activeCustomColors = preview ? preview.customColors : customColors;
+
   // Sync initial visible layers if empty
   useEffect(() => {
-    if (data && data.type === 'pcb' && visibleLayers.length === 0) {
-      setVisibleLayers(data.layers);
+    if (data && data.type === 'pcb' && activeVisibleLayers.length === 0) {
+      if (preview) {
+        // usePreview initializes its own layers on open, but just in case
+      } else {
+        setVisibleLayers(data.layers);
+      }
     }
-  }, [data, visibleLayers]);
+  }, [data, activeVisibleLayers, preview]);
 
   // Layer handlers
   const handleToggleLayer = (layer: string) => {
-    setVisibleLayers(prev => {
-      const next = prev.includes(layer) ? prev.filter(l => l !== layer) : [...prev, layer];
-      updateSetting('visibleLayers', next);
-      return next;
-    });
+    if (preview) {
+      preview.toggleLayer(layer);
+    } else {
+      setVisibleLayers(prev => {
+        const next = prev.includes(layer) ? prev.filter(l => l !== layer) : [...prev, layer];
+        updateSetting('visibleLayers', next);
+        return next;
+      });
+    }
   };
 
   const handleSetOpacity = (layer: string, opacity: number) => {
-    setLayerOpacities(prev => {
-      const next = { ...prev, [layer]: opacity };
-      updateSetting('layerOpacities', next);
-      return next;
-    });
+    if (preview) {
+      preview.setLayerOpacity(layer, opacity);
+    } else {
+      setLayerOpacities(prev => {
+        const next = { ...prev, [layer]: opacity };
+        updateSetting('layerOpacities', next);
+        return next;
+      });
+    }
   };
 
   const handleSetColor = (layer: string, color: string) => {
-    setCustomColors(prev => {
-      const next = { ...prev, [layer]: color };
-      updateSetting('customColors', next);
-      return next;
-    });
+    if (preview) {
+      preview.setLayerColor(layer, color);
+    } else {
+      setCustomColors(prev => {
+        const next = { ...prev, [layer]: color };
+        updateSetting('customColors', next);
+        return next;
+      });
+    }
   };
 
   const handleShowAll = () => {
-    if (!data || data.type !== 'pcb') return;
-    setVisibleLayers(data.layers);
-    updateSetting('visibleLayers', data.layers);
+    if (preview) {
+      preview.showAllLayers();
+    } else {
+      if (!data || data.type !== 'pcb') return;
+      setVisibleLayers(data.layers);
+      updateSetting('visibleLayers', data.layers);
+    }
   };
 
   const handleHideAll = () => {
-    setVisibleLayers([]);
-    updateSetting('visibleLayers', []);
+    if (preview) {
+      preview.hideAllLayers();
+    } else {
+      setVisibleLayers([]);
+      updateSetting('visibleLayers', []);
+    }
   };
 
   if (!data) {
@@ -198,8 +242,8 @@ export default function InWorkspacePreview({
           <div className="hidden lg:flex items-center gap-2 overflow-x-auto max-w-[450px] scrollbar-none px-2 py-1 bg-slate-950/40 rounded-lg border border-slate-800/60">
             {orderedLayers.slice(0, 7).map(layer => {
               const style = resolveLayerStyle(layer);
-              const customColor = customColors[layer] || style.color;
-              const isVisible = visibleLayers.includes(layer);
+              const customColor = activeCustomColors[layer] || style.color;
+              const isVisible = activeVisibleLayers.includes(layer);
               if (!isVisible) return null;
               
               return (
@@ -209,7 +253,7 @@ export default function InWorkspacePreview({
                     style={{ 
                       backgroundColor: customColor, 
                       borderColor: activeOutlineColor,
-                      opacity: layerOpacities[layer] ?? style.opacity ?? 1
+                      opacity: activeLayerOpacities[layer] ?? style.opacity ?? 1
                     }}
                   />
                   <span>{layer}</span>
@@ -259,6 +303,52 @@ export default function InWorkspacePreview({
             </button>
           </div>
 
+          {/* Render Mode Toggle (Vector / Raster) */}
+          {preview && (
+            <div className="flex bg-slate-950 p-1 rounded-lg border border-slate-800">
+              <button
+                onClick={() => preview.setRenderMode('vector')}
+                className={`px-2.5 py-1 rounded text-xs font-semibold transition-all cursor-pointer ${
+                  preview.renderMode === 'vector' 
+                    ? 'bg-slate-800 text-white font-bold' 
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+                title="Vector Mode (Sharp graphics)"
+              >
+                Vector
+              </button>
+              <button
+                onClick={() => preview.setRenderMode('raster')}
+                className={`px-2.5 py-1 rounded text-xs font-semibold transition-all cursor-pointer ${
+                  preview.renderMode === 'raster' 
+                    ? 'bg-slate-800 text-white font-bold' 
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+                title="Raster Mode (Pixelated snapshot)"
+              >
+                Raster
+              </button>
+            </div>
+          )}
+
+          {/* Colorblind Toggle */}
+          <button
+            onClick={() => {
+              const next = !isColorblind;
+              setIsColorblind(next);
+              localStorage.setItem(`project:${projectSlug}.isColorblindDiff`, String(next));
+              window.dispatchEvent(new Event('storage'));
+            }}
+            className={`px-2.5 py-1 rounded-lg border text-xs font-semibold cursor-pointer transition-all ${
+              isColorblind 
+                ? 'bg-amber-500/10 text-amber-400 border-amber-500/20 hover:bg-amber-500/20' 
+                : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-slate-200 hover:bg-slate-805'
+            }`}
+            title="Toggle Colorblind Mode"
+          >
+            👁️ Colorblind
+          </button>
+
           {/* Theme / Guideline Settings Button */}
           <div className="relative">
             <button 
@@ -275,7 +365,7 @@ export default function InWorkspacePreview({
               <div className="absolute right-0 mt-2 w-64 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl p-4 z-50 text-xs space-y-4 animate-slide-in-right">
                 <div className="flex justify-between items-center pb-2 border-b border-slate-800">
                   <span className="font-bold text-slate-200">Workspace Settings</span>
-                  <button onClick={() => setShowSettingsDropdown(false)} className="text-slate-500 hover:text-white">
+                  <button onClick={() => setShowSettingsDropdown(false)} className="text-slate-500 hover:text-white" title="Close settings dropdown">
                     <X className="w-3.5 h-3.5" />
                   </button>
                 </div>
@@ -291,6 +381,7 @@ export default function InWorkspacePreview({
                       updateSetting('dividerVisibleInMerged', e.target.checked);
                     }}
                     className="w-3.5 h-3.5 bg-slate-950 border border-slate-800 rounded"
+                    title="Divider guideline in Merged"
                   />
                 </div>
 
@@ -306,6 +397,7 @@ export default function InWorkspacePreview({
                         updateSetting('isHexOverride', e.target.checked);
                       }}
                       className="w-3.5 h-3.5 bg-slate-950 border border-slate-800 rounded"
+                      title="Custom UI Colors"
                     />
                   </div>
 
@@ -313,7 +405,7 @@ export default function InWorkspacePreview({
                     <div className="space-y-2 mt-2 font-mono text-[10px]">
                       <div className="flex items-center justify-between">
                         <span className="text-slate-500">Divider:</span>
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex items-center gap-1">
                           <input 
                             type="text" 
                             value={overrideDividerColor} 
@@ -322,6 +414,8 @@ export default function InWorkspacePreview({
                               updateSetting('overrideDividerColor', e.target.value);
                             }}
                             className="w-16 bg-slate-950 border border-slate-800 px-1 py-0.5 rounded text-slate-300 outline-none"
+                            title="Divider color hex value"
+                            placeholder="#xxxxxx"
                           />
                           <input 
                             type="color" 
@@ -331,12 +425,13 @@ export default function InWorkspacePreview({
                               updateSetting('overrideDividerColor', e.target.value);
                             }}
                             className="w-4 h-4 rounded cursor-pointer border border-slate-700"
+                            title="Divider color picker override"
                           />
                         </div>
                       </div>
                       <div className="flex items-center justify-between">
                         <span className="text-slate-500">Accent:</span>
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex items-center gap-1">
                           <input 
                             type="text" 
                             value={overrideAccentColor} 
@@ -345,6 +440,8 @@ export default function InWorkspacePreview({
                               updateSetting('overrideAccentColor', e.target.value);
                             }}
                             className="w-16 bg-slate-950 border border-slate-800 px-1 py-0.5 rounded text-slate-300 outline-none"
+                            title="Accent color hex value"
+                            placeholder="#xxxxxx"
                           />
                           <input 
                             type="color" 
@@ -354,12 +451,13 @@ export default function InWorkspacePreview({
                               updateSetting('overrideAccentColor', e.target.value);
                             }}
                             className="w-4 h-4 rounded cursor-pointer border border-slate-700"
+                            title="Accent color picker override"
                           />
                         </div>
                       </div>
                       <div className="flex items-center justify-between">
                         <span className="text-slate-500">Outline:</span>
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex items-center gap-1">
                           <input 
                             type="text" 
                             value={overrideOutlineColor} 
@@ -368,6 +466,8 @@ export default function InWorkspacePreview({
                               updateSetting('overrideOutlineColor', e.target.value);
                             }}
                             className="w-16 bg-slate-950 border border-slate-800 px-1 py-0.5 rounded text-slate-300 outline-none"
+                            title="Outline color hex value"
+                            placeholder="#xxxxxx"
                           />
                           <input 
                             type="color" 
@@ -377,6 +477,7 @@ export default function InWorkspacePreview({
                               updateSetting('overrideOutlineColor', e.target.value);
                             }}
                             className="w-4 h-4 rounded cursor-pointer border border-slate-700"
+                            title="Outline color picker override"
                           />
                         </div>
                       </div>
@@ -440,9 +541,9 @@ export default function InWorkspacePreview({
             <div className="flex-1 overflow-y-auto p-2 space-y-2 scrollbar-thin">
               {orderedLayers.map(layer => {
                 const style = resolveLayerStyle(layer);
-                const isVisible = visibleLayers.includes(layer);
-                const opacity = layerOpacities[layer] ?? style.opacity ?? 1;
-                const activeColor = customColors[layer] || style.color;
+                const isVisible = activeVisibleLayers.includes(layer);
+                const opacity = activeLayerOpacities[layer] ?? style.opacity ?? 1;
+                const activeColor = activeCustomColors[layer] || style.color;
 
                 return (
                   <div key={layer} className="p-2 rounded-xl bg-slate-950 border border-slate-800/80 flex flex-col gap-1.5 transition-all hover:border-slate-700">
@@ -494,6 +595,7 @@ export default function InWorkspacePreview({
                           value={opacity}
                           onChange={(e) => handleSetOpacity(layer, parseFloat(e.target.value))}
                           className="flex-1 h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-cyan-500"
+                          title="Layer Opacity"
                         />
                         <span className="text-[9px] font-mono text-slate-400 min-w-[24px] text-right font-bold">
                           {Math.round(opacity * 100)}%
@@ -528,10 +630,15 @@ export default function InWorkspacePreview({
             <div className="flex-1 w-full h-full relative">
               <HardwareCanvas 
                 data={data}
-                visibleLayers={visibleLayers}
-                layerOpacities={layerOpacities}
-                customColors={customColors}
+                visibleLayers={activeVisibleLayers}
+                layerOpacities={activeLayerOpacities}
+                customColors={activeCustomColors}
                 previewMode={true}
+                transform={preview?.transform}
+                onTransformChange={preview?.setTransform}
+                renderMode={preview?.renderMode}
+                isColorblind={isColorblind}
+                highlightedChange={preview?.highlightedChange}
               />
               
               {/* Subtle guideline divider if chosen */}
@@ -556,10 +663,15 @@ export default function InWorkspacePreview({
               <div className="flex-1 h-full w-1/2">
                 <HardwareCanvas 
                   data={data}
-                  visibleLayers={visibleLayers}
-                  layerOpacities={layerOpacities}
-                  customColors={customColors}
+                  visibleLayers={activeVisibleLayers}
+                  layerOpacities={activeLayerOpacities}
+                  customColors={activeCustomColors}
                   previewMode={true}
+                  transform={preview?.transform}
+                  onTransformChange={preview?.setTransform}
+                  renderMode={preview?.renderMode}
+                  isColorblind={isColorblind}
+                  highlightedChange={preview?.highlightedChange}
                 />
               </div>
 
@@ -580,10 +692,15 @@ export default function InWorkspacePreview({
               <div className="flex-1 h-full w-1/2">
                 <HardwareCanvas 
                   data={data}
-                  visibleLayers={visibleLayers}
-                  layerOpacities={layerOpacities}
-                  customColors={customColors}
+                  visibleLayers={activeVisibleLayers}
+                  layerOpacities={activeLayerOpacities}
+                  customColors={activeCustomColors}
                   previewMode={true}
+                  transform={preview?.transform}
+                  onTransformChange={preview?.setTransform}
+                  renderMode={preview?.renderMode}
+                  isColorblind={isColorblind}
+                  highlightedChange={preview?.highlightedChange}
                 />
               </div>
             </div>

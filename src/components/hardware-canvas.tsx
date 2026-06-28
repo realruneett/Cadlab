@@ -19,6 +19,10 @@ interface HardwareCanvasProps {
   previewMode?: boolean;
   onAddAnnotation?: (x: number, y: number) => void;
   onSelectAnnotation?: (id: string) => void;
+  transform?: ViewportTransform | null;
+  onTransformChange?: (transform: ViewportTransform) => void;
+  renderMode?: 'vector' | 'raster';
+  isColorblind?: boolean;
 }
 
 export default function HardwareCanvas({
@@ -32,12 +36,28 @@ export default function HardwareCanvas({
   reviewMode = false,
   previewMode = false,
   onAddAnnotation,
-  onSelectAnnotation
+  onSelectAnnotation,
+  transform: propTransform = null,
+  onTransformChange,
+  renderMode = 'vector',
+  isColorblind = false
 }: HardwareCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const rasterCacheRef = useRef<{ canvas: HTMLCanvasElement; key: string } | null>(null);
   
-  const [transform, setTransform] = useState<ViewportTransform>({ scale: 1, offsetX: 0, offsetY: 0 });
+  const [internalTransform, setInternalTransform] = useState<ViewportTransform>({ scale: 1, offsetX: 0, offsetY: 0 });
+  const transform = propTransform !== null ? propTransform : internalTransform;
+  
+  const setTransform = useCallback((t: ViewportTransform | ((prev: ViewportTransform) => ViewportTransform)) => {
+    const next = typeof t === 'function' ? t(transform) : t;
+    if (onTransformChange) {
+      onTransformChange(next);
+    } else {
+      setInternalTransform(next);
+    }
+  }, [transform, onTransformChange]);
+
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
   const [isPanning, setIsPanning] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
@@ -96,8 +116,17 @@ export default function HardwareCanvas({
 
   const getHighlightColor = useCallback((): { color: string; rgba: string; style: string } | null => {
     if (!highlightedChange) return null;
-    return DIFF_HIGHLIGHT[highlightedChange.type];
-  }, [highlightedChange]);
+    const base = DIFF_HIGHLIGHT[highlightedChange.type];
+    if (isColorblind) {
+      if (highlightedChange.type === 'added') {
+        return { color: '#0072B2', rgba: 'rgba(0, 114, 178, 0.6)', style: 'solid-glow' };
+      }
+      if (highlightedChange.type === 'removed') {
+        return { color: '#D55E00', rgba: 'rgba(213, 94, 0, 0.6)', style: 'dashed-outline' };
+      }
+    }
+    return base;
+  }, [highlightedChange, isColorblind]);
 
   // Main canvas draw loop
   useEffect(() => {
@@ -105,24 +134,6 @@ export default function HardwareCanvas({
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-
-    // Substrate background
-    ctx.fillStyle = '#0f172a';
-    ctx.fillRect(0, 0, dimensions.width, dimensions.height);
-
-    // Draw grid
-    ctx.strokeStyle = '#1e293b';
-    ctx.lineWidth = 0.5;
-    const gridSize = 20 * transform.scale;
-    const gridOffsetX = transform.offsetX % gridSize;
-    const gridOffsetY = transform.offsetY % gridSize;
-
-    for (let x = gridOffsetX; x < dimensions.width; x += gridSize) {
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, dimensions.height); ctx.stroke();
-    }
-    for (let y = gridOffsetY; y < dimensions.height; y += gridSize) {
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(dimensions.width, y); ctx.stroke();
-    }
 
     const isLayerVisible = (layerName: string): boolean => {
       if (data.type === 'schematic') return true;
@@ -134,310 +145,407 @@ export default function HardwareCanvas({
       return layerOpacities[layerName] ?? resolveLayerStyle(layerName).opacity ?? 1;
     };
 
-    if (data.type === 'pcb') {
-      const renderQueue: Array<{
-        type: 'trace' | 'via' | 'pad' | 'component' | 'outline';
-        layer: string;
-        zIndex: number;
-        data: any;
-      }> = [];
+    const drawDesignGeometry = (targetCtx: CanvasRenderingContext2D, currentTransform: ViewportTransform) => {
+      if (data.type === 'pcb') {
+        const renderQueue: Array<{
+          type: 'trace' | 'via' | 'pad' | 'component' | 'outline';
+          layer: string;
+          zIndex: number;
+          data: any;
+        }> = [];
 
-      for (const t of data.traces) {
-        if (!isLayerVisible(t.layer)) continue;
-        const style = getStyleWithOverride(t.layer);
-        renderQueue.push({ type: 'trace', layer: t.layer, zIndex: style.zIndex, data: t });
-      }
-
-      for (const v of data.vias) {
-        const isViaVisible = v.layers.some(l => isLayerVisible(l));
-        if (!isViaVisible) continue;
-        const style = getStyleWithOverride('Vias');
-        renderQueue.push({ type: 'via', layer: 'Vias', zIndex: style.zIndex, data: v });
-      }
-
-      for (const comp of data.components) {
-        if (!isLayerVisible(comp.layer)) continue;
-        for (const pad of comp.pads) {
-          if (!isLayerVisible(pad.layer)) continue;
-          const style = getStyleWithOverride(pad.layer);
-          renderQueue.push({ type: 'pad', layer: pad.layer, zIndex: style.zIndex, data: { pad, comp } });
-        }
-        const compStyle = getStyleWithOverride(comp.layer);
-        renderQueue.push({ type: 'component', layer: comp.layer, zIndex: compStyle.zIndex + 0.5, data: comp });
-      }
-
-      renderQueue.sort((a, b) => a.zIndex - b.zIndex);
-
-      for (const item of renderQueue) {
-        switch (item.type) {
-          case 'trace': {
-            const t = item.data;
-            const style = getStyleWithOverride(t.layer);
-            const opacity = getOpacity(t.layer);
-            const isHighlighted = highlightedChange && highlightedChange.layerIds.includes(t.layer) && 
-              t.points.some((p: Point) => isInHighlightBounds(p.x, p.y));
-            const hl = isHighlighted ? getHighlightColor() : null;
-
-            ctx.save();
-            ctx.strokeStyle = hl ? hl.color : style.color;
-            ctx.globalAlpha = hl ? 0.9 : opacity;
-            ctx.lineWidth = Math.max(0.5, t.width * transform.scale);
-            ctx.lineCap = 'round';
-            ctx.lineJoin = 'round';
-            
-            if (style.strokeDash && !hl) {
-              ctx.setLineDash(style.strokeDash.map(d => d * transform.scale));
-            }
-            if (hl?.style === 'dashed-outline') {
-              ctx.setLineDash([6, 4].map(d => d * transform.scale));
-            }
-
-            ctx.beginPath();
-            const p0 = toScreen(t.points[0].x, t.points[0].y, transform);
-            ctx.moveTo(p0.x, p0.y);
-            for (let idx = 1; idx < t.points.length; idx++) {
-              const pt = toScreen(t.points[idx].x, t.points[idx].y, transform);
-              ctx.lineTo(pt.x, pt.y);
-            }
-            ctx.stroke();
-
-            if (hl && (hl.style === 'solid-glow' || hl.style === 'pulse-outline')) {
-              ctx.shadowColor = hl.color;
-              ctx.shadowBlur = 8 * transform.scale;
-              ctx.stroke();
-              ctx.shadowBlur = 0;
-            }
-            ctx.restore();
-            break;
-          }
-
-          case 'via': {
-            const v = item.data;
-            const style = getStyleWithOverride('Vias');
-            const opacity = getOpacity('Vias');
-            const isHighlighted = highlightedChange && isInHighlightBounds(v.x, v.y);
-            const hl = isHighlighted ? getHighlightColor() : null;
-            const screenPos = toScreen(v.x, v.y, transform);
-            const radius = Math.max(0.5, (v.diameter / 2) * transform.scale);
-            const drillRadius = Math.max(0.3, (v.drill / 2) * transform.scale);
-
-            ctx.save();
-            ctx.fillStyle = hl ? hl.color : style.color;
-            ctx.globalAlpha = hl ? 0.9 : opacity;
-            ctx.beginPath();
-            ctx.arc(screenPos.x, screenPos.y, radius, 0, Math.PI * 2);
-            ctx.fill();
-
-            if (hl?.style === 'solid-glow') {
-              ctx.shadowColor = hl.color;
-              ctx.shadowBlur = 10 * transform.scale;
-              ctx.fill();
-              ctx.shadowBlur = 0;
-            }
-
-            ctx.fillStyle = '#0f172a';
-            ctx.globalAlpha = 1;
-            ctx.beginPath();
-            ctx.arc(screenPos.x, screenPos.y, drillRadius, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.restore();
-            break;
-          }
-
-          case 'pad': {
-            const { pad, comp } = item.data;
-            const style = getStyleWithOverride(pad.layer);
-            const opacity = getOpacity(pad.layer);
-            const isHighlighted = highlightedChange && highlightedChange.layerIds.includes(pad.layer) &&
-              isInHighlightBounds(pad.x, pad.y);
-            const hl = isHighlighted ? getHighlightColor() : null;
-            const sp = toScreen(pad.x, pad.y, transform);
-            const pw = Math.max(0.5, pad.width * transform.scale);
-            const ph = Math.max(0.5, pad.height * transform.scale);
-
-            ctx.save();
-            ctx.fillStyle = hl ? hl.color : style.color;
-            ctx.globalAlpha = hl ? 0.9 : opacity;
-
-            if (pad.shape === 'circle' || pad.shape === 'round') {
-              ctx.beginPath();
-              ctx.arc(sp.x, sp.y, Math.max(pw, ph) / 2, 0, Math.PI * 2);
-              ctx.fill();
-            } else {
-              ctx.fillRect(sp.x - pw / 2, sp.y - ph / 2, pw, ph);
-            }
-
-            if (hl?.style === 'solid-glow') {
-              ctx.shadowColor = hl.color;
-              ctx.shadowBlur = 8 * transform.scale;
-              if (pad.shape === 'circle' || pad.shape === 'round') {
-                ctx.beginPath();
-                ctx.arc(sp.x, sp.y, Math.max(pw, ph) / 2, 0, Math.PI * 2);
-                ctx.fill();
-              } else {
-                ctx.fillRect(sp.x - pw / 2, sp.y - ph / 2, pw, ph);
-              }
-              ctx.shadowBlur = 0;
-            }
-
-            if (pad.drill > 0) {
-              ctx.fillStyle = '#0f172a';
-              ctx.globalAlpha = 1;
-              ctx.beginPath();
-              ctx.arc(sp.x, sp.y, Math.max(0.3, (pad.drill / 2) * transform.scale), 0, Math.PI * 2);
-              ctx.fill();
-            }
-
-            if (transform.scale > 8) {
-              ctx.fillStyle = '#ffffff';
-              ctx.font = `${Math.max(8, Math.min(12, transform.scale))}px sans-serif`;
-              ctx.textAlign = 'center';
-              ctx.textBaseline = 'middle';
-              ctx.globalAlpha = 1;
-              ctx.fillText(pad.name, sp.x, sp.y);
-            }
-            ctx.restore();
-            break;
-          }
-
-          case 'component': {
-            const comp = item.data;
-            const sc = toScreen(comp.x, comp.y, transform);
-            
-            ctx.save();
-            ctx.strokeStyle = '#facc15';
-            ctx.lineWidth = 1;
-            const crossSize = 3 * transform.scale;
-            ctx.beginPath();
-            ctx.moveTo(sc.x - crossSize, sc.y);
-            ctx.lineTo(sc.x + crossSize, sc.y);
-            ctx.moveTo(sc.x, sc.y - crossSize);
-            ctx.lineTo(sc.x, sc.y + crossSize);
-            ctx.stroke();
-
-            if (transform.scale > 2) {
-              ctx.fillStyle = '#e2e8f0';
-              ctx.font = '10px monospace';
-              ctx.textAlign = 'center';
-              ctx.globalAlpha = 1;
-              ctx.fillText(comp.designator, sc.x, sc.y - 2.5 * transform.scale);
-            }
-            ctx.restore();
-            break;
-          }
-        }
-      }
-
-      const edgeCuts = data.traces.filter(t => {
-        const l = t.layer.toLowerCase();
-        return l === 'edge.cuts' || l === 'dimension' || l === 'outline';
-      });
-      
-      if (edgeCuts.length > 0) {
-        const outlineStyle = getStyleWithOverride('Edge.Cuts');
-        ctx.save();
-        ctx.strokeStyle = outlineStyle.color;
-        ctx.lineWidth = 2;
-        ctx.setLineDash([]);
-        
-        for (const t of edgeCuts) {
-          ctx.beginPath();
-          const p0 = toScreen(t.points[0].x, t.points[0].y, transform);
-          ctx.moveTo(p0.x, p0.y);
-          for (let idx = 1; idx < t.points.length; idx++) {
-            const pt = toScreen(t.points[idx].x, t.points[idx].y, transform);
-            ctx.lineTo(pt.x, pt.y);
-          }
-          ctx.stroke();
-        }
-        ctx.restore();
-      }
-
-      if (hoveredNet && !highlightedChange) {
-        const netColor = getNetColor(hoveredNet);
-        ctx.save();
-        ctx.strokeStyle = netColor;
-        ctx.globalAlpha = 0.3;
-        ctx.lineWidth = 3;
         for (const t of data.traces) {
-          if (t.net !== hoveredNet) continue;
           if (!isLayerVisible(t.layer)) continue;
-          ctx.beginPath();
-          const p0 = toScreen(t.points[0].x, t.points[0].y, transform);
-          ctx.moveTo(p0.x, p0.y);
-          for (let idx = 1; idx < t.points.length; idx++) {
-            const pt = toScreen(t.points[idx].x, t.points[idx].y, transform);
-            ctx.lineTo(pt.x, pt.y);
-          }
-          ctx.stroke();
+          const style = getStyleWithOverride(t.layer);
+          renderQueue.push({ type: 'trace', layer: t.layer, zIndex: style.zIndex, data: t });
         }
-        ctx.restore();
-      }
 
-    } else {
-      for (const net of data.nets) {
-        ctx.save();
-        ctx.strokeStyle = '#06b6d4';
-        ctx.lineWidth = 1.5;
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
+        for (const v of data.vias) {
+          const isViaVisible = v.layers.some(l => isLayerVisible(l));
+          if (!isViaVisible) continue;
+          const style = getStyleWithOverride('Vias');
+          renderQueue.push({ type: 'via', layer: 'Vias', zIndex: style.zIndex, data: v });
+        }
+
+        for (const comp of data.components) {
+          if (!isLayerVisible(comp.layer)) continue;
+          for (const pad of comp.pads) {
+            if (!isLayerVisible(pad.layer)) continue;
+            const style = getStyleWithOverride(pad.layer);
+            renderQueue.push({ type: 'pad', layer: pad.layer, zIndex: style.zIndex, data: { pad, comp } });
+          }
+          const compStyle = getStyleWithOverride(comp.layer);
+          renderQueue.push({ type: 'component', layer: comp.layer, zIndex: compStyle.zIndex + 0.5, data: comp });
+        }
+
+        renderQueue.sort((a, b) => a.zIndex - b.zIndex);
+
+        for (const item of renderQueue) {
+          switch (item.type) {
+            case 'trace': {
+              const t = item.data;
+              const style = getStyleWithOverride(t.layer);
+              const opacity = getOpacity(t.layer);
+              const isHighlighted = highlightedChange && highlightedChange.layerIds.includes(t.layer) && 
+                t.points.some((p: Point) => isInHighlightBounds(p.x, p.y));
+              const hl = isHighlighted ? getHighlightColor() : null;
+
+              targetCtx.save();
+              targetCtx.strokeStyle = hl ? hl.color : style.color;
+              targetCtx.globalAlpha = hl ? 0.9 : opacity;
+              targetCtx.lineWidth = Math.max(0.5, t.width * currentTransform.scale);
+              targetCtx.lineCap = 'round';
+              targetCtx.lineJoin = 'round';
+              
+              if (style.strokeDash && !hl) {
+                targetCtx.setLineDash(style.strokeDash.map(d => d * currentTransform.scale));
+              }
+              if (hl?.style === 'dashed-outline') {
+                targetCtx.setLineDash([6, 4].map(d => d * currentTransform.scale));
+              }
+
+              targetCtx.beginPath();
+              const p0 = toScreen(t.points[0].x, t.points[0].y, currentTransform);
+              targetCtx.moveTo(p0.x, p0.y);
+              for (let idx = 1; idx < t.points.length; idx++) {
+                const pt = toScreen(t.points[idx].x, t.points[idx].y, currentTransform);
+                targetCtx.lineTo(pt.x, pt.y);
+              }
+              targetCtx.stroke();
+
+              if (hl && (hl.style === 'solid-glow' || hl.style === 'pulse-outline')) {
+                targetCtx.shadowColor = hl.color;
+                targetCtx.shadowBlur = 8 * currentTransform.scale;
+                targetCtx.stroke();
+                targetCtx.shadowBlur = 0;
+              }
+              targetCtx.restore();
+              break;
+            }
+
+            case 'via': {
+              const v = item.data;
+              const style = getStyleWithOverride('Vias');
+              const opacity = getOpacity('Vias');
+              const isHighlighted = highlightedChange && isInHighlightBounds(v.x, v.y);
+              const hl = isHighlighted ? getHighlightColor() : null;
+              const screenPos = toScreen(v.x, v.y, currentTransform);
+              const radius = Math.max(0.5, (v.diameter / 2) * currentTransform.scale);
+              const drillRadius = Math.max(0.3, (v.drill / 2) * currentTransform.scale);
+
+              targetCtx.save();
+              targetCtx.fillStyle = hl ? hl.color : style.color;
+              targetCtx.globalAlpha = hl ? 0.9 : opacity;
+              targetCtx.beginPath();
+              targetCtx.arc(screenPos.x, screenPos.y, radius, 0, Math.PI * 2);
+              targetCtx.fill();
+
+              if (hl?.style === 'solid-glow') {
+                targetCtx.shadowColor = hl.color;
+                targetCtx.shadowBlur = 10 * currentTransform.scale;
+                targetCtx.fill();
+                targetCtx.shadowBlur = 0;
+              }
+
+              if (isColorblind && hl?.style === 'dashed-outline') {
+                targetCtx.strokeStyle = '#ffffff';
+                targetCtx.lineWidth = 1.5;
+                targetCtx.setLineDash([6, 4].map(d => d * currentTransform.scale));
+                targetCtx.beginPath();
+                targetCtx.arc(screenPos.x, screenPos.y, radius, 0, Math.PI * 2);
+                targetCtx.stroke();
+              }
+
+              targetCtx.fillStyle = '#0f172a';
+              targetCtx.globalAlpha = 1;
+              targetCtx.beginPath();
+              targetCtx.arc(screenPos.x, screenPos.y, drillRadius, 0, Math.PI * 2);
+              targetCtx.fill();
+              targetCtx.restore();
+              break;
+            }
+
+            case 'pad': {
+              const { pad, comp } = item.data;
+              const style = getStyleWithOverride(pad.layer);
+              const opacity = getOpacity(pad.layer);
+              const isHighlighted = highlightedChange && highlightedChange.layerIds.includes(pad.layer) &&
+                isInHighlightBounds(pad.x, pad.y);
+              const hl = isHighlighted ? getHighlightColor() : null;
+              const sp = toScreen(pad.x, pad.y, currentTransform);
+              const pw = Math.max(0.5, pad.width * currentTransform.scale);
+              const ph = Math.max(0.5, pad.height * currentTransform.scale);
+
+              targetCtx.save();
+              targetCtx.fillStyle = hl ? hl.color : style.color;
+              targetCtx.globalAlpha = hl ? 0.9 : opacity;
+
+              if (pad.shape === 'circle' || pad.shape === 'round') {
+                targetCtx.beginPath();
+                targetCtx.arc(sp.x, sp.y, Math.max(pw, ph) / 2, 0, Math.PI * 2);
+                targetCtx.fill();
+              } else {
+                targetCtx.fillRect(sp.x - pw / 2, sp.y - ph / 2, pw, ph);
+              }
+
+              if (hl?.style === 'solid-glow') {
+                targetCtx.shadowColor = hl.color;
+                targetCtx.shadowBlur = 8 * currentTransform.scale;
+                if (pad.shape === 'circle' || pad.shape === 'round') {
+                  targetCtx.beginPath();
+                  targetCtx.arc(sp.x, sp.y, Math.max(pw, ph) / 2, 0, Math.PI * 2);
+                  targetCtx.fill();
+                } else {
+                  targetCtx.fillRect(sp.x - pw / 2, sp.y - ph / 2, pw, ph);
+                }
+                targetCtx.shadowBlur = 0;
+              }
+
+              if (isColorblind && hl?.style === 'dashed-outline') {
+                targetCtx.strokeStyle = '#ffffff';
+                targetCtx.lineWidth = 1.5;
+                targetCtx.setLineDash([6, 4].map(d => d * currentTransform.scale));
+                if (pad.shape === 'circle' || pad.shape === 'round') {
+                  targetCtx.beginPath();
+                  targetCtx.arc(sp.x, sp.y, Math.max(pw, ph) / 2, 0, Math.PI * 2);
+                  targetCtx.stroke();
+                } else {
+                  targetCtx.strokeRect(sp.x - pw / 2, sp.y - ph / 2, pw, ph);
+                }
+              }
+
+              if (pad.drill > 0) {
+                targetCtx.fillStyle = '#0f172a';
+                targetCtx.globalAlpha = 1;
+                targetCtx.beginPath();
+                targetCtx.arc(sp.x, sp.y, Math.max(0.3, (pad.drill / 2) * currentTransform.scale), 0, Math.PI * 2);
+                targetCtx.fill();
+              }
+
+              if (currentTransform.scale > 8) {
+                targetCtx.fillStyle = '#ffffff';
+                targetCtx.font = `${Math.max(8, Math.min(12, currentTransform.scale))}px sans-serif`;
+                targetCtx.textAlign = 'center';
+                targetCtx.textBaseline = 'middle';
+                targetCtx.globalAlpha = 1;
+                targetCtx.fillText(pad.name, sp.x, sp.y);
+              }
+              targetCtx.restore();
+              break;
+            }
+
+            case 'component': {
+              const comp = item.data;
+              const sc = toScreen(comp.x, comp.y, currentTransform);
+              
+              targetCtx.save();
+              targetCtx.strokeStyle = '#facc15';
+              targetCtx.lineWidth = 1;
+              const crossSize = 3 * currentTransform.scale;
+              targetCtx.beginPath();
+              targetCtx.moveTo(sc.x - crossSize, sc.y);
+              targetCtx.lineTo(sc.x + crossSize, sc.y);
+              targetCtx.moveTo(sc.x, sc.y - crossSize);
+              targetCtx.lineTo(sc.x, sc.y + crossSize);
+              targetCtx.stroke();
+
+              if (currentTransform.scale > 2) {
+                targetCtx.fillStyle = '#e2e8f0';
+                targetCtx.font = '10px monospace';
+                targetCtx.textAlign = 'center';
+                targetCtx.globalAlpha = 1;
+                targetCtx.fillText(comp.designator, sc.x, sc.y - 2.5 * currentTransform.scale);
+              }
+              targetCtx.restore();
+              break;
+            }
+          }
+        }
+
+        const edgeCuts = data.traces.filter(t => {
+          const l = t.layer.toLowerCase();
+          return l === 'edge.cuts' || l === 'dimension' || l === 'outline';
+        });
         
-        for (const seg of net.segments) {
-          ctx.beginPath();
-          const p0 = toScreen(seg.points[0].x, seg.points[0].y, transform);
-          ctx.moveTo(p0.x, p0.y);
-          for (let idx = 1; idx < seg.points.length; idx++) {
-            const pt = toScreen(seg.points[idx].x, seg.points[idx].y, transform);
-            ctx.lineTo(pt.x, pt.y);
+        if (edgeCuts.length > 0) {
+          const outlineStyle = getStyleWithOverride('Edge.Cuts');
+          targetCtx.save();
+          targetCtx.strokeStyle = outlineStyle.color;
+          targetCtx.lineWidth = 2;
+          targetCtx.setLineDash([]);
+          
+          for (const t of edgeCuts) {
+            targetCtx.beginPath();
+            const p0 = toScreen(t.points[0].x, t.points[0].y, currentTransform);
+            targetCtx.moveTo(p0.x, p0.y);
+            for (let idx = 1; idx < t.points.length; idx++) {
+              const pt = toScreen(t.points[idx].x, t.points[idx].y, currentTransform);
+              targetCtx.lineTo(pt.x, pt.y);
+            }
+            targetCtx.stroke();
           }
-          ctx.stroke();
-        }
-        ctx.restore();
-      }
-
-      for (const comp of data.components) {
-        const sc = toScreen(comp.x, comp.y, transform);
-        const size = 6 * transform.scale;
-
-        ctx.save();
-        ctx.strokeStyle = '#10b981';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(sc.x - size, sc.y - size, size * 2, size * 2);
-        ctx.fillStyle = 'rgba(16, 185, 129, 0.05)';
-        ctx.fillRect(sc.x - size, sc.y - size, size * 2, size * 2);
-
-        for (const pin of comp.pins) {
-          const sp = toScreen(pin.x, pin.y, transform);
-          ctx.strokeStyle = '#14b8a6';
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.moveTo(sc.x, sc.y);
-          ctx.lineTo(sp.x, sp.y);
-          ctx.stroke();
-
-          ctx.fillStyle = '#f43f5e';
-          ctx.beginPath();
-          ctx.arc(sp.x, sp.y, 2, 0, Math.PI * 2);
-          ctx.fill();
-
-          if (transform.scale > 3) {
-            ctx.fillStyle = '#94a3b8';
-            ctx.font = '8px sans-serif';
-            ctx.textAlign = sp.x > sc.x ? 'left' : 'right';
-            ctx.fillText(pin.name, sp.x + (sp.x > sc.x ? 4 : -4), sp.y - 2);
-          }
+          targetCtx.restore();
         }
 
-        ctx.fillStyle = '#ffffff';
-        ctx.font = 'bold 12px monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText(comp.designator, sc.x, sc.y - size - 6);
+        if (hoveredNet && !highlightedChange) {
+          const netColor = getNetColor(hoveredNet);
+          targetCtx.save();
+          targetCtx.strokeStyle = netColor;
+          targetCtx.globalAlpha = 0.3;
+          targetCtx.lineWidth = 3;
+          for (const t of data.traces) {
+            if (t.net !== hoveredNet) continue;
+            if (!isLayerVisible(t.layer)) continue;
+            targetCtx.beginPath();
+            const p0 = toScreen(t.points[0].x, t.points[0].y, currentTransform);
+            targetCtx.moveTo(p0.x, p0.y);
+            for (let idx = 1; idx < t.points.length; idx++) {
+              const pt = toScreen(t.points[idx].x, t.points[idx].y, currentTransform);
+              targetCtx.lineTo(pt.x, pt.y);
+            }
+            targetCtx.stroke();
+          }
+          targetCtx.restore();
+        }
 
-        ctx.fillStyle = '#94a3b8';
-        ctx.font = '10px monospace';
-        ctx.fillText(comp.value, sc.x, sc.y + size + 12);
-        ctx.restore();
+      } else {
+        for (const net of data.nets) {
+          targetCtx.save();
+          targetCtx.strokeStyle = '#06b6d4';
+          targetCtx.lineWidth = 1.5;
+          targetCtx.lineCap = 'round';
+          targetCtx.lineJoin = 'round';
+          
+          for (const seg of net.segments) {
+            targetCtx.beginPath();
+            const p0 = toScreen(seg.points[0].x, seg.points[0].y, currentTransform);
+            targetCtx.moveTo(p0.x, p0.y);
+            for (let idx = 1; idx < seg.points.length; idx++) {
+              const pt = toScreen(seg.points[idx].x, seg.points[idx].y, currentTransform);
+              targetCtx.lineTo(pt.x, pt.y);
+            }
+            targetCtx.stroke();
+          }
+          targetCtx.restore();
+        }
+
+        for (const comp of data.components) {
+          const sc = toScreen(comp.x, comp.y, currentTransform);
+          const size = 6 * currentTransform.scale;
+
+          targetCtx.save();
+          targetCtx.strokeStyle = '#10b981';
+          targetCtx.lineWidth = 2;
+          targetCtx.strokeRect(sc.x - size, sc.y - size, size * 2, size * 2);
+          targetCtx.fillStyle = 'rgba(16, 185, 129, 0.05)';
+          targetCtx.fillRect(sc.x - size, sc.y - size, size * 2, size * 2);
+
+          for (const pin of comp.pins) {
+            const sp = toScreen(pin.x, pin.y, currentTransform);
+            targetCtx.strokeStyle = '#14b8a6';
+            targetCtx.lineWidth = 1;
+            targetCtx.beginPath();
+            targetCtx.moveTo(sc.x, sc.y);
+            targetCtx.lineTo(sp.x, sp.y);
+            targetCtx.stroke();
+
+            targetCtx.fillStyle = '#f43f5e';
+            targetCtx.beginPath();
+            targetCtx.arc(sp.x, sp.y, 2, 0, Math.PI * 2);
+            targetCtx.fill();
+
+            if (currentTransform.scale > 3) {
+              targetCtx.fillStyle = '#94a3b8';
+              targetCtx.font = '8px sans-serif';
+              targetCtx.textAlign = sp.x > sc.x ? 'left' : 'right';
+              targetCtx.fillText(pin.name, sp.x + (sp.x > sc.x ? 4 : -4), sp.y - 2);
+            }
+          }
+
+          targetCtx.fillStyle = '#ffffff';
+          targetCtx.font = 'bold 12px monospace';
+          targetCtx.textAlign = 'center';
+          targetCtx.fillText(comp.designator, sc.x, sc.y - size - 6);
+
+          targetCtx.fillStyle = '#94a3b8';
+          targetCtx.font = '10px monospace';
+          targetCtx.fillText(comp.value, sc.x, sc.y + size + 12);
+          targetCtx.restore();
+        }
       }
+    };
+
+    const bounds = data.bounds;
+    const cacheKey = JSON.stringify({
+      visibleLayers,
+      layerOpacities,
+      customColors,
+      dataBounds: data.bounds,
+      highlight: highlightedChange?.id
+    });
+
+    if (renderMode === 'raster' && (!rasterCacheRef.current || rasterCacheRef.current.key !== cacheKey)) {
+      const R = 8;
+      const bW = Math.max(10, bounds.maxX - bounds.minX);
+      const bH = Math.max(10, bounds.maxY - bounds.minY);
+      const offscreenCanvas = document.createElement('canvas');
+      offscreenCanvas.width = Math.ceil(bW * R);
+      offscreenCanvas.height = Math.ceil(bH * R);
+
+      const offCtx = offscreenCanvas.getContext('2d');
+      if (offCtx) {
+        offCtx.fillStyle = '#0f172a';
+        offCtx.fillRect(0, 0, offscreenCanvas.width, offscreenCanvas.height);
+        const offTransform = {
+          scale: R,
+          offsetX: -bounds.minX * R,
+          offsetY: -bounds.minY * R
+        };
+        drawDesignGeometry(offCtx, offTransform);
+        rasterCacheRef.current = { canvas: offscreenCanvas, key: cacheKey };
+      }
+    }
+
+    if (renderMode === 'raster' && rasterCacheRef.current) {
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(0, 0, dimensions.width, dimensions.height);
+
+      ctx.strokeStyle = '#1e293b';
+      ctx.lineWidth = 0.5;
+      const gridSize = 20 * transform.scale;
+      const gridOffsetX = transform.offsetX % gridSize;
+      const gridOffsetY = transform.offsetY % gridSize;
+
+      for (let x = gridOffsetX; x < dimensions.width; x += gridSize) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, dimensions.height); ctx.stroke();
+      }
+      for (let y = gridOffsetY; y < dimensions.height; y += gridSize) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(dimensions.width, y); ctx.stroke();
+      }
+
+      const pMin = toScreen(bounds.minX, bounds.minY, transform);
+      const pMax = toScreen(bounds.maxX, bounds.maxY, transform);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(rasterCacheRef.current.canvas, pMin.x, pMin.y, pMax.x - pMin.x, pMax.y - pMin.y);
+      ctx.imageSmoothingEnabled = true;
+    } else {
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(0, 0, dimensions.width, dimensions.height);
+
+      ctx.strokeStyle = '#1e293b';
+      ctx.lineWidth = 0.5;
+      const gridSize = 20 * transform.scale;
+      const gridOffsetX = transform.offsetX % gridSize;
+      const gridOffsetY = transform.offsetY % gridSize;
+
+      for (let x = gridOffsetX; x < dimensions.width; x += gridSize) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, dimensions.height); ctx.stroke();
+      }
+      for (let y = gridOffsetY; y < dimensions.height; y += gridSize) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(dimensions.width, y); ctx.stroke();
+      }
+
+      drawDesignGeometry(ctx, transform);
     }
 
     for (const ann of annotations) {
@@ -472,7 +580,7 @@ export default function HardwareCanvas({
       ctx.fillText("💬", sp.x, sp.y - 0.5);
       ctx.restore();
     }
-  }, [data, transform, visibleLayers, layerOpacities, customColors, highlightedChange, hoveredNet, annotations, selectedAnnotationId, dimensions, getStyleWithOverride]);
+  }, [data, transform, visibleLayers, layerOpacities, customColors, highlightedChange, hoveredNet, annotations, selectedAnnotationId, dimensions, getStyleWithOverride, renderMode, isColorblind]);
 
   // Click & Drag panning/adding annotation handlers
   const handleMouseDown = (e: React.MouseEvent) => {

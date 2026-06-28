@@ -10,12 +10,14 @@ interface DiffCanvasProps {
   diffData: DiffedHardwareData;
   visibleLayers?: string[];
   opacity: number; // 0.0 to 1.0
+  isColorblind?: boolean;
 }
 
 export default function DiffCanvas({
   diffData,
   visibleLayers = [],
-  opacity
+  opacity,
+  isColorblind = false
 }: DiffCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -85,28 +87,20 @@ export default function DiffCanvas({
     }
 
     // Color mapper for diff status
-    // Unchanged -> Muted Gray
-    // Added -> Green
-    // Deleted -> Red
-    // Modified -> Red (Old), Green (New)
     const getDiffStyle = (status: 'added' | 'deleted' | 'modified' | 'unchanged', isNewRevision: boolean) => {
       if (status === 'unchanged') {
-        return { color: '#64748b', opacity: 0.6 }; // Slate-500 gray
+        return { color: '#64748b', opacity: 0.6, dash: null };
       }
       if (status === 'added' && isNewRevision) {
-        return { color: '#22c55e', opacity: opacity }; // Emerald-500 Green
+        return { color: isColorblind ? '#0072B2' : '#22c55e', opacity: opacity, dash: isColorblind ? [6, 4] : null };
       }
       if (status === 'deleted' && !isNewRevision) {
-        return { color: '#ef4444', opacity: 1 - opacity }; // Rose-500 Red
+        return { color: isColorblind ? '#D55E00' : '#ef4444', opacity: 1 - opacity, dash: isColorblind ? [2, 3] : null };
       }
       if (status === 'modified') {
-        if (isNewRevision) {
-          return { color: '#22c55e', opacity: opacity };
-        } else {
-          return { color: '#ef4444', opacity: 1 - opacity };
-        }
+        return { color: '#eab308', opacity: 0.8, dash: null };
       }
-      return null; // Don't draw
+      return { color: '#334155', opacity: 0.1, dash: null };
     };
 
     if (diffData.type === 'pcb') {
@@ -124,6 +118,10 @@ export default function DiffCanvas({
           ctx.lineWidth = t.width * transform.scale;
           ctx.lineCap = 'round';
           ctx.lineJoin = 'round';
+
+          if (style.dash) {
+            ctx.setLineDash(style.dash.map(d => d * transform.scale));
+          }
 
           ctx.beginPath();
           const p0 = toScreen(t.points[0].x, t.points[0].y, transform);
@@ -158,6 +156,16 @@ export default function DiffCanvas({
           ctx.arc(screenPos.x, screenPos.y, radius, 0, Math.PI * 2);
           ctx.fill();
 
+          // Pattern outline boundary for accessibility
+          if (isColorblind && style.dash) {
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 1;
+            ctx.setLineDash(style.dash.map(d => d * transform.scale));
+            ctx.beginPath();
+            ctx.arc(screenPos.x, screenPos.y, radius, 0, Math.PI * 2);
+            ctx.stroke();
+          }
+
           ctx.fillStyle = '#0f172a';
           ctx.beginPath();
           ctx.arc(screenPos.x, screenPos.y, drillRadius, 0, Math.PI * 2);
@@ -190,8 +198,24 @@ export default function DiffCanvas({
               ctx.beginPath();
               ctx.arc(sp.x, sp.y, pw / 2, 0, Math.PI * 2);
               ctx.fill();
+
+              if (isColorblind && style.dash) {
+                ctx.strokeStyle = '#ffffff';
+                ctx.lineWidth = 1;
+                ctx.setLineDash(style.dash.map(d => d * transform.scale));
+                ctx.beginPath();
+                ctx.arc(sp.x, sp.y, pw / 2, 0, Math.PI * 2);
+                ctx.stroke();
+              }
             } else {
               ctx.fillRect(sp.x - pw / 2, sp.y - ph / 2, pw, ph);
+
+              if (isColorblind && style.dash) {
+                ctx.strokeStyle = '#ffffff';
+                ctx.lineWidth = 1;
+                ctx.setLineDash(style.dash.map(d => d * transform.scale));
+                ctx.strokeRect(sp.x - pw / 2, sp.y - ph / 2, pw, ph);
+              }
             }
           }
 
@@ -238,12 +262,18 @@ export default function DiffCanvas({
 
           ctx.strokeStyle = style.color;
           ctx.lineWidth = 2;
+          if (style.dash) {
+            ctx.setLineDash(style.dash.map(d => d * transform.scale));
+          }
           ctx.strokeRect(sc.x - size, sc.y - size, size * 2, size * 2);
 
           // Draw pins
           for (const pin of comp.pins) {
             const sp = toScreen(pin.x, pin.y, transform);
             ctx.strokeStyle = style.color;
+            if (style.dash) {
+              ctx.setLineDash(style.dash.map(d => d * transform.scale));
+            }
             ctx.beginPath();
             ctx.moveTo(sc.x, sc.y);
             ctx.lineTo(sp.x, sp.y);
@@ -274,6 +304,10 @@ export default function DiffCanvas({
           ctx.strokeStyle = style.color;
           ctx.lineWidth = 1.5;
 
+          if (style.dash) {
+            ctx.setLineDash(style.dash.map(d => d * transform.scale));
+          }
+
           for (const seg of net.segments) {
             ctx.beginPath();
             const p0 = toScreen(seg.points[0].x, seg.points[0].y, transform);
@@ -296,7 +330,7 @@ export default function DiffCanvas({
       drawSchNets(diffData.newRevision.nets, true);
       drawSchComponents(diffData.newRevision.components, true);
     }
-  }, [diffData, transform, visibleLayers, opacity, dimensions]);
+  }, [diffData, transform, visibleLayers, opacity, dimensions, isColorblind]);
 
   // Mouse pan/zoom handlers
   const handleMouseDown = (e: MouseEvent<HTMLCanvasElement>) => {

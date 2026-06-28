@@ -5,6 +5,7 @@ import { useState, useCallback, useEffect } from 'react';
 import { PCBData } from '../lib/parsers/kicad/pcbParser';
 import { SchematicData } from '../lib/parsers/kicad/schParser';
 import { getOrderedLayers, resolveLayerStyle } from '../lib/layers/layer-colors';
+import { ViewportTransform } from '../lib/canvas/coordinate-translator';
 
 export interface PreviewChange {
   id: string;
@@ -21,9 +22,13 @@ export interface PreviewState {
   data: PCBData | SchematicData | null;
   visibleLayers: string[];
   layerOpacities: Record<string, number>;
+  customColors: Record<string, string>;
   highlightedChange: PreviewChange | null;
   isLoading: boolean;
   error: string | null;
+  renderMode: 'vector' | 'raster';
+  snapshotId: string | null;
+  transform: ViewportTransform | null;
 }
 
 const DEFAULT_OPACITIES: Record<string, number> = {
@@ -58,13 +63,28 @@ export function usePreview() {
     data: null,
     visibleLayers: [],
     layerOpacities: {},
+    customColors: {},
     highlightedChange: null,
     isLoading: false,
     error: null,
+    renderMode: 'vector',
+    snapshotId: null,
+    transform: null,
   });
 
   const openPreview = useCallback(async (fileId: string, fileName: string, fileContent?: string) => {
-    setState(prev => ({ ...prev, isOpen: true, fileId, fileName, isLoading: true, error: null }));
+    const computedSnapshotId = `snapshot-${fileId}-${fileContent ? fileContent.length : 'remote'}`;
+    setState(prev => ({ 
+      ...prev, 
+      isOpen: true, 
+      fileId, 
+      fileName, 
+      isLoading: true, 
+      error: null,
+      snapshotId: computedSnapshotId,
+      renderMode: 'vector',
+      transform: null
+    }));
 
     try {
       let data: PCBData | SchematicData | null = null;
@@ -93,8 +113,8 @@ export function usePreview() {
         layerOpacities: opacities,
         isLoading: false,
       }));
-    } catch (err: any) {
-      setState(prev => ({ ...prev, error: err.message, isLoading: false }));
+    } catch (err) {
+      setState(prev => ({ ...prev, error: (err as Error).message, isLoading: false }));
     }
   }, []);
 
@@ -106,9 +126,13 @@ export function usePreview() {
       data: null,
       visibleLayers: [],
       layerOpacities: {},
+      customColors: {},
       highlightedChange: null,
       isLoading: false,
       error: null,
+      renderMode: 'vector',
+      snapshotId: null,
+      transform: null,
     });
   }, []);
 
@@ -143,6 +167,21 @@ export function usePreview() {
     setState(prev => ({ ...prev, highlightedChange: change }));
   }, []);
 
+  const setRenderMode = useCallback((renderMode: 'vector' | 'raster') => {
+    setState(prev => ({ ...prev, renderMode }));
+  }, []);
+
+  const setTransform = useCallback((transform: ViewportTransform | null) => {
+    setState(prev => ({ ...prev, transform }));
+  }, []);
+
+  const setLayerColor = useCallback((layerId: string, color: string) => {
+    setState(prev => ({
+      ...prev,
+      customColors: { ...prev.customColors, [layerId]: color },
+    }));
+  }, []);
+
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && state.isOpen) {
@@ -159,8 +198,11 @@ export function usePreview() {
     closePreview,
     toggleLayer,
     setLayerOpacity,
+    setLayerColor,
     showAllLayers,
     hideAllLayers,
     highlightChange,
+    setRenderMode,
+    setTransform,
   };
 }

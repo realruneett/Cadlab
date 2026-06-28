@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { 
   ArrowLeft, 
@@ -13,7 +13,14 @@ import {
   Database,
   Lock,
   ArrowRightLeft,
-  PanelLeft
+  PanelLeft,
+  ChevronRight,
+  Keyboard,
+  Upload,
+  HelpCircle,
+  X as XIcon,
+  Zap,
+  Eye
 } from 'lucide-react';
 
 const Github = (props: React.SVGProps<SVGSVGElement>) => (
@@ -110,6 +117,15 @@ export default function ComparePage() {
   // Sidebar Toggling & Animation States
   const [isSidebarVisible, setIsSidebarVisible] = useState<boolean>(true);
 
+  // Keyboard Shortcut Help Overlay
+  const [showShortcutHelp, setShowShortcutHelp] = useState(false);
+
+  // Auto-detect toast state
+  const [showAutoDetectToast, setShowAutoDetectToast] = useState(false);
+
+  // Drag-over visual state for empty zone
+  const [isDragOver, setIsDragOver] = useState(false);
+
   // Keyboard shortcut listener (Ctrl+B / Cmd+B) to toggle sidebar
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -122,13 +138,29 @@ export default function ComparePage() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  // Keyboard shortcut listener to toggle preview (Shortcut P)
+  // Keyboard shortcut listener to toggle preview (Shortcut P) and help overlay (?)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') {
+        return;
+      }
+
+      // ? key — toggle keyboard shortcut help
+      if (e.key === '?' || (e.shiftKey && e.key === '/')) {
+        e.preventDefault();
+        setShowShortcutHelp(prev => !prev);
+        return;
+      }
+
+      // Esc — close help overlay
+      if (e.key === 'Escape' && showShortcutHelp) {
+        e.preventDefault();
+        setShowShortcutHelp(false);
+        return;
+      }
+
+      // P key — toggle preview
       if (e.key === 'p' || e.key === 'P') {
-        if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') {
-          return;
-        }
         e.preventDefault();
         if (preview.isOpen) {
           preview.closePreview();
@@ -139,7 +171,7 @@ export default function ComparePage() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [preview.isOpen, selectedLeft]);
+  }, [preview.isOpen, selectedLeft, showShortcutHelp]);
 
   // Persist sidebar state per repository slug (or local mode)
   useEffect(() => {
@@ -260,6 +292,9 @@ export default function ComparePage() {
   useEffect(() => {
     if (selectedLeft && selectedRight && isHardwareFile(selectedLeft.name) && isHardwareFile(selectedRight.name)) {
       setViewType('visual');
+      setShowAutoDetectToast(true);
+      const timer = setTimeout(() => setShowAutoDetectToast(false), 4000);
+      return () => clearTimeout(timer);
     } else {
       setViewType('code');
     }
@@ -510,6 +545,23 @@ export default function ComparePage() {
       {/* Main Workspace Area */}
       <main className="flex-1 flex overflow-hidden p-6">
         
+        {/* Sidebar Reveal Handle (visible when sidebar hidden) */}
+        {!isSidebarVisible && (
+          <div
+            onClick={toggleSidebar}
+            onKeyDown={(e) => e.key === 'Enter' && toggleSidebar()}
+            role="button"
+            tabIndex={0}
+            aria-label="Show sidebar (Ctrl+B)"
+            title="Show sidebar (Ctrl+B)"
+            className="shrink-0 w-2 h-full flex items-center justify-center cursor-pointer group transition-all duration-200 mr-1 rounded-full"
+          >
+            <div className="w-full h-full rounded-full bg-slate-800/30 group-hover:bg-blue-500/10 transition-all relative flex items-center justify-center">
+              <ChevronRight className="w-3 h-3 text-slate-600 group-hover:text-blue-400 opacity-0 group-hover:opacity-100 transition-all absolute" />
+            </div>
+          </div>
+        )}
+
         {/* SIDEBAR Panel: File Lists, Fetchers, & Configs */}
         <aside className={`shrink-0 flex flex-col gap-4 overflow-hidden h-full transition-all duration-300 ease-in-out ${
           isSidebarVisible ? 'w-80 opacity-100 mr-6' : 'w-0 opacity-0 pointer-events-none mr-0'
@@ -734,11 +786,31 @@ export default function ComparePage() {
             </div>
           )}
 
+          {/* Auto-detect toast */}
+          {showAutoDetectToast && (
+            <div className="shrink-0 flex items-center justify-between p-3 bg-blue-950/25 border border-blue-900/30 rounded-xl text-xs animate-fade-in">
+              <div className="flex items-center gap-2">
+                <Eye className="w-3.5 h-3.5 text-blue-400" />
+                <span className="text-slate-300">
+                  Hardware files detected — switched to <strong className="text-blue-400">Visual Diff</strong> mode
+                </span>
+              </div>
+              <button
+                onClick={() => { setViewType('code'); setShowAutoDetectToast(false); }}
+                className="text-blue-400 hover:text-blue-300 text-[10px] font-semibold underline underline-offset-2 cursor-pointer transition-colors"
+              >
+                Switch to Code
+              </button>
+            </div>
+          )}
+
           {/* Side-by-Side Diff Component or Canvas */}
           <div 
-            onDragOver={(e) => e.preventDefault()}
+            onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
+            onDragLeave={() => setIsDragOver(false)}
             onDrop={async (e) => {
               e.preventDefault();
+              setIsDragOver(false);
               const files = e.dataTransfer.files;
               if (files && files.length > 0) {
                 const file = files[0];
@@ -751,15 +823,29 @@ export default function ComparePage() {
                 }
               }
             }}
-            className="flex-1 min-h-[400px] flex overflow-hidden"
+            className={`flex-1 min-h-[400px] flex overflow-hidden transition-all duration-200 ${isDragOver ? 'drop-zone-active rounded-2xl' : ''}`}
           >
             {preview.isOpen ? (
-              <InWorkspacePreview
-                fileName={preview.fileName || ''}
-                data={preview.data}
-                onClose={preview.closePreview}
-                projectSlug={(mode === 'github' && selectedRepoSlug) ? selectedRepoSlug : 'local'}
-              />
+              <div className="flex-1 flex overflow-hidden gap-4">
+                <div className="flex-1 flex overflow-hidden border border-slate-800 rounded-2xl bg-slate-950/40">
+                  <InWorkspacePreview
+                    fileName={preview.fileName || ''}
+                    data={preview.data}
+                    onClose={preview.closePreview}
+                    projectSlug={(mode === 'github' && selectedRepoSlug) ? selectedRepoSlug : 'local'}
+                    preview={preview}
+                  />
+                </div>
+                {canShowVisualDiff && viewType === 'visual' && !visualDiffError && clientDiffData && (
+                  <div className="flex-1 flex overflow-hidden border border-slate-800 rounded-2xl bg-slate-950/40">
+                    <SideBySideCanvas
+                      diffData={clientDiffData}
+                      projectSlug={mode === 'github' ? selectedRepoSlug : 'local'}
+                      preview={preview}
+                    />
+                  </div>
+                )}
+              </div>
             ) : canShowVisualDiff && viewType === 'visual' ? (
               visualDiffError ? (
                 <div className="flex-1 glass-panel rounded-2xl flex flex-col items-center justify-center p-8 text-center min-h-[400px] border-slate-800/80 bg-slate-950/20">
@@ -767,8 +853,61 @@ export default function ComparePage() {
                   <div className="text-xs text-slate-500 max-w-md font-mono">{visualDiffError}</div>
                 </div>
               ) : (
-                clientDiffData && <SideBySideCanvas diffData={clientDiffData} projectSlug={mode === 'github' ? selectedRepoSlug : 'local'} />
+                clientDiffData && (
+                  <SideBySideCanvas
+                    diffData={clientDiffData}
+                    projectSlug={mode === 'github' ? selectedRepoSlug : 'local'}
+                    preview={preview}
+                  />
+                )
               )
+            ) : !selectedLeft && !selectedRight ? (
+              /* ── Rich Empty State / Onboarding ── */
+              <div className={`flex-1 glass-panel rounded-2xl flex flex-col items-center justify-center p-10 text-center border-2 border-dashed transition-all duration-300 ${
+                isDragOver ? 'border-blue-500/50 bg-blue-950/10' : 'border-slate-800/50 bg-slate-950/20'
+              }`}>
+                <div className="animate-float-subtle mb-6">
+                  <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-blue-500/20 to-indigo-500/20 border border-blue-500/20 flex items-center justify-center">
+                    <Upload className="w-7 h-7 text-blue-400/80" />
+                  </div>
+                </div>
+
+                <h3 className="text-lg font-bold text-slate-200 mb-2">Start Comparing</h3>
+                <p className="text-xs text-slate-500 max-w-md mb-6 leading-relaxed">
+                  Select files from the sidebar, drag & drop files here, or connect a GitHub repository to begin side-by-side comparison.
+                </p>
+
+                {/* Supported format badges */}
+                <div className="flex flex-wrap gap-2 mb-6 justify-center">
+                  {[
+                    { label: '.kicad_pcb', color: 'text-blue-400 bg-blue-500/10 border-blue-500/20' },
+                    { label: '.kicad_sch', color: 'text-amber-400 bg-amber-500/10 border-amber-500/20' },
+                    { label: '.brd', color: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' },
+                    { label: '.sch', color: 'text-purple-400 bg-purple-500/10 border-purple-500/20' },
+                    { label: 'Any text file', color: 'text-slate-400 bg-slate-500/10 border-slate-500/20' },
+                  ].map(fmt => (
+                    <span key={fmt.label} className={`px-2 py-0.5 rounded text-[10px] font-semibold border ${fmt.color}`}>
+                      {fmt.label}
+                    </span>
+                  ))}
+                </div>
+
+                {/* Quick action hints */}
+                <div className="flex flex-col gap-1.5 text-[10px] text-slate-600">
+                  <div className="flex items-center gap-2">
+                    <kbd className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400 font-mono text-[9px]">Ctrl+B</kbd>
+                    <span>Toggle sidebar</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <kbd className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400 font-mono text-[9px]">P</kbd>
+                    <span>Preview selected file</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <kbd className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400 font-mono text-[9px]">?</kbd>
+                    <span>Show all keyboard shortcuts</span>
+                  </div>
+                </div>
+              </div>
             ) : (
               <CompareView
                 leftFile={selectedLeft}
@@ -787,6 +926,60 @@ export default function ComparePage() {
         </section>
 
       </main>
+
+      {/* ── Keyboard Shortcut Help Overlay ── */}
+      {showShortcutHelp && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fade-in" onClick={() => setShowShortcutHelp(false)}>
+          <div className="glass-panel rounded-2xl p-6 max-w-md w-full mx-4 border border-slate-700/60 animate-scale-in shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-5">
+              <div className="flex items-center gap-2">
+                <Keyboard className="w-4 h-4 text-blue-400" />
+                <h3 className="text-sm font-bold text-slate-200">Keyboard Shortcuts</h3>
+              </div>
+              <button onClick={() => setShowShortcutHelp(false)} className="p-1 hover:bg-slate-800 rounded-lg text-slate-500 hover:text-white transition-all cursor-pointer" title="Close keyboard shortcut help">
+                <XIcon className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              {[
+                { section: 'Navigation', shortcuts: [
+                  { keys: 'Ctrl+B', desc: 'Toggle sidebar' },
+                  { keys: 'P', desc: 'Toggle file preview' },
+                  { keys: '?', desc: 'Show / hide this help' },
+                  { keys: 'Esc', desc: 'Close overlays & modals' },
+                ]},
+                { section: 'Zoom (Visual Diff)', shortcuts: [
+                  { keys: 'Alt+1', desc: 'Zoom in left panel' },
+                  { keys: 'Alt+2', desc: 'Zoom out left panel' },
+                  { keys: 'Alt+3', desc: 'Zoom in right panel' },
+                  { keys: 'Alt+4', desc: 'Zoom out right panel' },
+                  { keys: 'Alt+L', desc: 'Toggle sync lock' },
+                ]},
+                { section: 'Display', shortcuts: [
+                  { keys: 'Ctrl+\\', desc: 'Toggle panel border' },
+                ]},
+              ].map(group => (
+                <div key={group.section}>
+                  <div className="text-[9px] uppercase tracking-widest text-slate-600 font-bold mb-2">{group.section}</div>
+                  <div className="space-y-1.5">
+                    {group.shortcuts.map(s => (
+                      <div key={s.keys} className="flex items-center justify-between text-xs">
+                        <span className="text-slate-400">{s.desc}</span>
+                        <kbd className="px-2 py-0.5 rounded bg-slate-800/80 border border-slate-700/60 text-slate-300 font-mono text-[10px] min-w-[48px] text-center">{s.keys}</kbd>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-5 pt-3 border-t border-slate-800/60 text-center">
+              <span className="text-[10px] text-slate-600">Press <kbd className="px-1 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400 font-mono text-[9px]">?</kbd> or <kbd className="px-1 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400 font-mono text-[9px]">Esc</kbd> to close</span>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

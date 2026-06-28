@@ -103,6 +103,7 @@ export default function LayerLegend({
                       onChange={(e) => onSetOpacity(layer, parseInt(e.target.value) / 100)}
                       onClick={(e) => e.stopPropagation()}
                       className="flex-1 h-1 bg-slate-650 rounded-lg appearance-none accent-emerald-500 cursor-pointer"
+                      title="Layer Opacity"
                     />
                   </div>
                 </div>

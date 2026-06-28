@@ -20,22 +20,28 @@ import {
   EyeOff
 } from 'lucide-react';
 import { resolveLayerStyle, getOrderedLayers } from '../lib/layers/layer-colors';
+import { usePreview } from '../hooks/usePreview';
 
 interface SideBySideCanvasProps {
   diffData: DiffedHardwareData;
   visibleLayers?: string[];
   projectSlug?: string;
+  preview?: ReturnType<typeof usePreview>;
 }
 
 export default function SideBySideCanvas({
   diffData,
   visibleLayers: initialVisibleLayers = [],
   projectSlug = 'local',
+  preview,
 }: SideBySideCanvasProps) {
   const leftCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const rightCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const borderRef = useRef<HTMLDivElement | null>(null);
+
+  const leftRasterCacheRef = useRef<{ canvas: HTMLCanvasElement; key: string } | null>(null);
+  const rightRasterCacheRef = useRef<{ canvas: HTMLCanvasElement; key: string } | null>(null);
 
   // Per-panel independent transform states
   const [leftTransform, setLeftTransform] = useState<ViewportTransform>({ scale: 1, offsetX: 0, offsetY: 0 });
@@ -64,19 +70,48 @@ export default function SideBySideCanvas({
   const [layerOpacitiesA, setLayerOpacitiesA] = useState<Record<string, number>>({});
   const [customColorsA, setCustomColorsA] = useState<Record<string, string>>({});
   const [showOnlyDiffA, setShowOnlyDiffA] = useState<boolean>(false);
+  const [renderModeA, setRenderModeA] = useState<'vector' | 'raster'>('vector');
 
   const [sidebarOpenB, setSidebarOpenB] = useState<boolean>(true);
   const [visibleLayersB, setVisibleLayersB] = useState<string[]>([]);
   const [layerOpacitiesB, setLayerOpacitiesB] = useState<Record<string, number>>({});
   const [customColorsB, setCustomColorsB] = useState<Record<string, string>>({});
   const [showOnlyDiffB, setShowOnlyDiffB] = useState<boolean>(false);
+  const [renderModeB, setRenderModeB] = useState<'vector' | 'raster'>('vector');
+
+  // Backup states for Undo sync
+  const [backupStateA, setBackupStateA] = useState<any | null>(null);
+  const [backupStateB, setBackupStateB] = useState<any | null>(null);
 
   // Computed layout variables
   const sidebarWidth = 200;
   const colWidth = Math.max(100, Math.floor(dimensions.width / 2));
   
-  // Detect theme colors
-  const swatchOutlineColor = isDarkMode ? '#ffffff' : '#000000';
+  // Dynamic Contrast Outline helper
+  const getContrastOutlineColor = (hex: string): string => {
+    if (!hex || !hex.startsWith('#')) return isDarkMode ? '#ffffff30' : '#00000030';
+    const cleanHex = hex.replace('#', '');
+    let r = 0, g = 0, b = 0;
+    if (cleanHex.length === 3) {
+      r = parseInt(cleanHex[0] + cleanHex[0], 16);
+      g = parseInt(cleanHex[1] + cleanHex[1], 16);
+      b = parseInt(cleanHex[2] + cleanHex[2], 16);
+    } else if (cleanHex.length === 6) {
+      r = parseInt(cleanHex.substring(0, 2), 16);
+      g = parseInt(cleanHex.substring(2, 4), 16);
+      b = parseInt(cleanHex.substring(4, 6), 16);
+    } else {
+      return isDarkMode ? '#ffffff30' : '#00000030';
+    }
+    const luma = 0.299 * r + 0.587 * g + 0.114 * b;
+    if (luma < 50) return 'rgba(255, 255, 255, 0.45)';
+    if (luma > 200) return 'rgba(0, 0, 0, 0.6)';
+    return isDarkMode ? 'rgba(255, 255, 255, 0.15)' : 'rgba(0, 0, 0, 0.15)';
+  };
+
+  // Primitive counts per layer
+  const primitivesCountA = useMemo(() => getPrimitivesCountPerLayer(diffData.oldRevision), [diffData.oldRevision]);
+  const primitivesCountB = useMemo(() => getPrimitivesCountPerLayer(diffData.newRevision), [diffData.newRevision]);
 
   // Load and apply persistent settings per project
   useEffect(() => {
@@ -95,6 +130,8 @@ export default function SideBySideCanvas({
     setIsColorblind(loadLocal('isColorblindDiff', false));
     setIsLocked(loadLocal('diff-zoom-locked', true));
     setIsBorderVisible(loadLocal('diffBorderVisible', true));
+    setRenderModeA(loadLocal('panelA.renderMode', 'vector'));
+    setRenderModeB(loadLocal('panelB.renderMode', 'vector'));
 
     const stateA = loadLocal('panelA.layerStates', null);
     if (stateA) {
@@ -114,6 +151,17 @@ export default function SideBySideCanvas({
       setVisibleLayersB(diffData.type === 'pcb' ? (diffData.newRevision as any).layers || [] : []);
     }
   }, [projectSlug, diffData]);
+
+  // Listen for storage events to synchronize colorblind preference
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleStorage = () => {
+      const val = localStorage.getItem(`project:${projectSlug}.isColorblindDiff`);
+      setIsColorblind(val === 'true');
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, [projectSlug]);
 
   // Persistence helpers
   const saveStateA = useCallback((visible: string[], opacities: Record<string, number>, colors: Record<string, string>) => {
@@ -139,6 +187,14 @@ export default function SideBySideCanvas({
   const saveSidebarBVisible = useCallback((open: boolean) => {
     localStorage.setItem(`project:${projectSlug}.panelB.sidebarVisible`, String(open));
   }, [projectSlug]);
+
+  const saveRenderModeA = (mode: 'vector' | 'raster') => {
+    localStorage.setItem(`project:${projectSlug}.panelA.renderMode`, mode);
+  };
+
+  const saveRenderModeB = (mode: 'vector' | 'raster') => {
+    localStorage.setItem(`project:${projectSlug}.panelB.renderMode`, mode);
+  };
 
   // Sidebar transition resize trigger to reflow canvases
   const handleSidebarToggle = () => {
@@ -267,9 +323,9 @@ export default function SideBySideCanvas({
 
   // --- Main Draw Loop ---
   useEffect(() => {
-    drawCanvas(leftCanvasRef.current, false, leftTransform, activeVisibleLayersA, layerOpacitiesA, customColorsA);
-    drawCanvas(rightCanvasRef.current, true, rightTransform, activeVisibleLayersB, layerOpacitiesB, customColorsB);
-  }, [diffData, leftTransform, rightTransform, activeVisibleLayersA, layerOpacitiesA, customColorsA, activeVisibleLayersB, layerOpacitiesB, customColorsB, dimensions, isColorblind]);
+    drawCanvas(leftCanvasRef.current, false, leftTransform, activeVisibleLayersA, layerOpacitiesA, customColorsA, renderModeA);
+    drawCanvas(rightCanvasRef.current, true, isLocked ? leftTransform : rightTransform, activeVisibleLayersB, layerOpacitiesB, customColorsB, renderModeB);
+  }, [diffData, leftTransform, rightTransform, activeVisibleLayersA, layerOpacitiesA, customColorsA, activeVisibleLayersB, layerOpacitiesB, customColorsB, dimensions, isColorblind, renderModeA, renderModeB, isLocked]);
 
   // Zoom preset actions
   const handleApplyPreset = (side: 'left' | 'right', scalePct: number) => {
@@ -379,7 +435,8 @@ export default function SideBySideCanvas({
     currentTransform: ViewportTransform,
     visibleLayersList: string[],
     layerOpacitiesMap: Record<string, number>,
-    customColorsMap: Record<string, string>
+    customColorsMap: Record<string, string>,
+    renderMode: 'vector' | 'raster'
   ) => {
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -395,229 +452,298 @@ export default function SideBySideCanvas({
       canvas.height = height;
     }
 
-    // Substrate
-    ctx.fillStyle = '#0b0f19';
-    ctx.fillRect(0, 0, width, height);
-
-    // Draw Grid
-    ctx.strokeStyle = '#1e293b';
-    ctx.lineWidth = 0.5;
-    const gridSize = 20 * currentTransform.scale;
-    const gridOffsetX = currentTransform.offsetX % gridSize;
-    const gridOffsetY = currentTransform.offsetY % gridSize;
-
-    for (let x = gridOffsetX; x < width; x += gridSize) {
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();
-    }
-    for (let y = gridOffsetY; y < height; y += gridSize) {
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
-    }
-
     const isLayerVisible = (layerName: string): boolean => {
       if (diffData.type === 'schematic') return true;
       if (visibleLayersList.length === 0) return true;
       return visibleLayersList.includes(layerName) || layerName === 'MultiLayer';
     };
 
-    if (diffData.type === 'pcb') {
-      const pcbRev = revision as any;
+    const drawDiffGeometry = (targetCtx: CanvasRenderingContext2D, targetTransform: ViewportTransform) => {
+      if (diffData.type === 'pcb') {
+        const pcbRev = revision as any;
 
-      // 1. Draw traces
-      for (const t of pcbRev.traces || []) {
-        if (!isLayerVisible(t.layer)) continue;
+        // 1. Draw traces
+        for (const t of pcbRev.traces || []) {
+          if (!isLayerVisible(t.layer)) continue;
 
-        const style = getDiffStyle(t.diffStatus, isNewRevision, t.layer, layerOpacitiesMap, customColorsMap);
-        if (style.opacity <= 0.15) continue;
+          const style = getDiffStyle(t.diffStatus, isNewRevision, t.layer, layerOpacitiesMap, customColorsMap);
+          if (style.opacity <= 0.15) continue;
 
-        ctx.save();
-        ctx.strokeStyle = style.color;
-        ctx.globalAlpha = style.opacity;
-        ctx.lineWidth = Math.max(1, t.width * currentTransform.scale);
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
+          targetCtx.save();
+          targetCtx.strokeStyle = style.color;
+          targetCtx.globalAlpha = style.opacity;
+          targetCtx.lineWidth = Math.max(1, t.width * targetTransform.scale);
+          targetCtx.lineCap = 'round';
+          targetCtx.lineJoin = 'round';
 
-        if (style.dash) {
-          ctx.setLineDash(style.dash.map(d => d * currentTransform.scale));
+          if (style.dash) {
+            targetCtx.setLineDash(style.dash.map(d => d * targetTransform.scale));
+          }
+
+          targetCtx.beginPath();
+          const p0 = toScreen(t.points[0].x, t.points[0].y, targetTransform);
+          targetCtx.moveTo(p0.x, p0.y);
+          for (let idx = 1; idx < t.points.length; idx++) {
+            const pt = toScreen(t.points[idx].x, t.points[idx].y, targetTransform);
+            targetCtx.lineTo(pt.x, pt.y);
+          }
+          targetCtx.stroke();
+          targetCtx.restore();
         }
 
-        ctx.beginPath();
-        const p0 = toScreen(t.points[0].x, t.points[0].y, currentTransform);
-        ctx.moveTo(p0.x, p0.y);
-        for (let idx = 1; idx < t.points.length; idx++) {
-          const pt = toScreen(t.points[idx].x, t.points[idx].y, currentTransform);
-          ctx.lineTo(pt.x, pt.y);
-        }
-        ctx.stroke();
-        ctx.restore();
-      }
+        // 2. Draw Vias
+        for (const v of pcbRev.vias || []) {
+          const isViaVisible = v.layers.some((l: string) => isLayerVisible(l));
+          if (!isViaVisible) continue;
 
-      // 2. Draw Vias
-      for (const v of pcbRev.vias || []) {
-        const isViaVisible = v.layers.some((l: string) => isLayerVisible(l));
-        if (!isViaVisible) continue;
+          const style = getDiffStyle(v.diffStatus, isNewRevision, 'Vias', layerOpacitiesMap, customColorsMap);
+          if (style.opacity <= 0.15) continue;
 
-        const style = getDiffStyle(v.diffStatus, isNewRevision, 'Vias', layerOpacitiesMap, customColorsMap);
-        if (style.opacity <= 0.15) continue;
+          const screenPos = toScreen(v.x, v.y, targetTransform);
+          const radius = (v.diameter / 2) * targetTransform.scale;
+          const drillRadius = (v.drill / 2) * targetTransform.scale;
 
-        const screenPos = toScreen(v.x, v.y, currentTransform);
-        const radius = (v.diameter / 2) * currentTransform.scale;
-        const drillRadius = (v.drill / 2) * currentTransform.scale;
+          targetCtx.save();
+          targetCtx.fillStyle = style.color;
+          targetCtx.globalAlpha = style.opacity;
+          targetCtx.beginPath();
+          targetCtx.arc(screenPos.x, screenPos.y, radius, 0, Math.PI * 2);
+          targetCtx.fill();
 
-        ctx.save();
-        ctx.fillStyle = style.color;
-        ctx.globalAlpha = style.opacity;
-        ctx.beginPath();
-        ctx.arc(screenPos.x, screenPos.y, radius, 0, Math.PI * 2);
-        ctx.fill();
+          // Pattern outline boundary for accessibility
+          if (isColorblind && style.dash) {
+            targetCtx.strokeStyle = '#ffffff';
+            targetCtx.lineWidth = 1;
+            targetCtx.setLineDash(style.dash.map(d => d * targetTransform.scale));
+            targetCtx.beginPath();
+            targetCtx.arc(screenPos.x, screenPos.y, radius, 0, Math.PI * 2);
+            targetCtx.stroke();
+          }
 
-        // Pattern outline boundary for accessibility
-        if (isColorblind && style.dash) {
-          ctx.strokeStyle = '#ffffff';
-          ctx.lineWidth = 1;
-          ctx.setLineDash(style.dash.map(d => d * currentTransform.scale));
-          ctx.beginPath();
-          ctx.arc(screenPos.x, screenPos.y, radius, 0, Math.PI * 2);
-          ctx.stroke();
+          targetCtx.fillStyle = '#0b0f19';
+          targetCtx.globalAlpha = 1.0;
+          targetCtx.beginPath();
+          targetCtx.arc(screenPos.x, screenPos.y, drillRadius, 0, Math.PI * 2);
+          targetCtx.fill();
+          targetCtx.restore();
         }
 
-        ctx.fillStyle = '#0b0f19';
-        ctx.globalAlpha = 1.0;
-        ctx.beginPath();
-        ctx.arc(screenPos.x, screenPos.y, drillRadius, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-      }
+        // 3. Components & Pads
+        for (const comp of pcbRev.components || []) {
+          if (!isLayerVisible(comp.layer)) continue;
 
-      // 3. Components & Pads
-      for (const comp of pcbRev.components || []) {
-        if (!isLayerVisible(comp.layer)) continue;
+          const compStyle = getDiffStyle(comp.diffStatus, isNewRevision, comp.layer, layerOpacitiesMap, customColorsMap);
+          if (compStyle.opacity <= 0.15) continue;
 
-        const compStyle = getDiffStyle(comp.diffStatus, isNewRevision, comp.layer, layerOpacitiesMap, customColorsMap);
-        if (compStyle.opacity <= 0.15) continue;
+          // Render pads
+          for (const pad of comp.pads || []) {
+            if (!isLayerVisible(pad.layer)) continue;
 
-        // Render pads
-        for (const pad of comp.pads || []) {
-          if (!isLayerVisible(pad.layer)) continue;
+            const style = getDiffStyle(pad.diffStatus, isNewRevision, pad.layer, layerOpacitiesMap, customColorsMap);
+            const sp = toScreen(pad.x, pad.y, targetTransform);
+            const pw = pad.width * targetTransform.scale;
+            const ph = pad.height * targetTransform.scale;
 
-          const style = getDiffStyle(pad.diffStatus, isNewRevision, pad.layer, layerOpacitiesMap, customColorsMap);
-          const sp = toScreen(pad.x, pad.y, currentTransform);
-          const pw = pad.width * currentTransform.scale;
-          const ph = pad.height * currentTransform.scale;
+            targetCtx.save();
+            targetCtx.fillStyle = style.color;
+            targetCtx.globalAlpha = style.opacity;
 
-          ctx.save();
-          ctx.fillStyle = style.color;
-          ctx.globalAlpha = style.opacity;
+            if (pad.shape === 'circle' || pad.shape === 'round') {
+              targetCtx.beginPath();
+              targetCtx.arc(sp.x, sp.y, pw / 2, 0, Math.PI * 2);
+              targetCtx.fill();
 
-          if (pad.shape === 'circle' || pad.shape === 'round') {
-            ctx.beginPath();
-            ctx.arc(sp.x, sp.y, pw / 2, 0, Math.PI * 2);
-            ctx.fill();
+              if (isColorblind && style.dash) {
+                targetCtx.strokeStyle = '#ffffff';
+                targetCtx.lineWidth = 1;
+                targetCtx.setLineDash(style.dash.map(d => d * targetTransform.scale));
+                targetCtx.beginPath();
+                targetCtx.arc(sp.x, sp.y, pw / 2, 0, Math.PI * 2);
+                targetCtx.stroke();
+              }
+            } else {
+              targetCtx.fillRect(sp.x - pw / 2, sp.y - ph / 2, pw, ph);
 
-            if (isColorblind && style.dash) {
-              ctx.strokeStyle = '#ffffff';
-              ctx.lineWidth = 1;
-              ctx.setLineDash(style.dash.map(d => d * currentTransform.scale));
-              ctx.beginPath();
-              ctx.arc(sp.x, sp.y, pw / 2, 0, Math.PI * 2);
-              ctx.stroke();
+              if (isColorblind && style.dash) {
+                targetCtx.strokeStyle = '#ffffff';
+                targetCtx.lineWidth = 1;
+                targetCtx.setLineDash(style.dash.map(d => d * targetTransform.scale));
+                targetCtx.strokeRect(sp.x - pw / 2, sp.y - ph / 2, pw, ph);
+              }
             }
-          } else {
-            ctx.fillRect(sp.x - pw / 2, sp.y - ph / 2, pw, ph);
 
-            if (isColorblind && style.dash) {
-              ctx.strokeStyle = '#ffffff';
-              ctx.lineWidth = 1;
-              ctx.setLineDash(style.dash.map(d => d * currentTransform.scale));
-              ctx.strokeRect(sp.x - pw / 2, sp.y - ph / 2, pw, ph);
+            if (pad.drill > 0) {
+              targetCtx.fillStyle = '#0b0f19';
+              targetCtx.globalAlpha = 1.0;
+              targetCtx.beginPath();
+              targetCtx.arc(sp.x, sp.y, (pad.drill / 2) * targetTransform.scale, 0, Math.PI * 2);
+              targetCtx.fill();
             }
+            targetCtx.restore();
           }
 
-          if (pad.drill > 0) {
-            ctx.fillStyle = '#0b0f19';
-            ctx.globalAlpha = 1.0;
-            ctx.beginPath();
-            ctx.arc(sp.x, sp.y, (pad.drill / 2) * currentTransform.scale, 0, Math.PI * 2);
-            ctx.fill();
+          // Anchor outlines
+          const sc = toScreen(comp.x, comp.y, targetTransform);
+          targetCtx.save();
+          targetCtx.strokeStyle = compStyle.color;
+          targetCtx.globalAlpha = compStyle.opacity;
+          targetCtx.lineWidth = comp.diffStatus !== 'unchanged' ? 2 : 1;
+          if (compStyle.dash) {
+            targetCtx.setLineDash(compStyle.dash);
           }
-          ctx.restore();
+          targetCtx.beginPath();
+          targetCtx.arc(sc.x, sc.y, 2 * targetTransform.scale, 0, Math.PI * 2);
+          targetCtx.stroke();
+
+          if (targetTransform.scale > 1.5) {
+            targetCtx.fillStyle = compStyle.color;
+            targetCtx.font = 'bold 9px monospace';
+            targetCtx.textAlign = 'center';
+            targetCtx.fillText(comp.designator, sc.x, sc.y - 3 * targetTransform.scale);
+          }
+          targetCtx.restore();
+        }
+      } else {
+        // Schematic rendering
+        const schRev = revision as any;
+        for (const net of schRev.nets || []) {
+          const netStyle = getDiffStyle(net.diffStatus, isNewRevision);
+          if (netStyle.opacity === 0.2) continue;
+
+          targetCtx.save();
+          targetCtx.strokeStyle = netStyle.color;
+          targetCtx.lineWidth = net.diffStatus !== 'unchanged' ? 2.5 : 1.5;
+          targetCtx.lineCap = 'round';
+          targetCtx.lineJoin = 'round';
+
+          if (netStyle.dash) {
+            targetCtx.setLineDash(netStyle.dash);
+          }
+
+          for (const seg of net.segments || []) {
+            targetCtx.beginPath();
+            const p0 = toScreen(seg.points[0].x, seg.points[0].y, targetTransform);
+            targetCtx.moveTo(p0.x, p0.y);
+            for (let idx = 1; idx < seg.points.length; idx++) {
+              const pt = toScreen(seg.points[idx].x, seg.points[idx].y, targetTransform);
+              targetCtx.lineTo(pt.x, pt.y);
+            }
+            targetCtx.stroke();
+          }
+          targetCtx.restore();
         }
 
-        // Anchor outlines
-        const sc = toScreen(comp.x, comp.y, currentTransform);
-        ctx.save();
-        ctx.strokeStyle = compStyle.color;
-        ctx.globalAlpha = compStyle.opacity;
-        ctx.lineWidth = comp.diffStatus !== 'unchanged' ? 2 : 1;
-        ctx.beginPath();
-        ctx.arc(sc.x, sc.y, 2 * currentTransform.scale, 0, Math.PI * 2);
-        ctx.stroke();
+        for (const comp of schRev.components || []) {
+          const compStyle = getDiffStyle(comp.diffStatus, isNewRevision);
+          if (compStyle.opacity === 0.2) continue;
 
-        if (currentTransform.scale > 1.5) {
-          ctx.fillStyle = compStyle.color;
-          ctx.font = 'bold 9px monospace';
-          ctx.textAlign = 'center';
-          ctx.fillText(comp.designator, sc.x, sc.y - 3 * currentTransform.scale);
+          const sc = toScreen(comp.x, comp.y, targetTransform);
+          const size = 6 * targetTransform.scale;
+
+          targetCtx.save();
+          targetCtx.strokeStyle = compStyle.color;
+          targetCtx.lineWidth = comp.diffStatus !== 'unchanged' ? 3 : 2;
+          if (compStyle.dash) {
+            targetCtx.setLineDash(compStyle.dash);
+          }
+          targetCtx.strokeRect(sc.x - size, sc.y - size, size * 2, size * 2);
+          targetCtx.fillStyle = comp.diffStatus !== 'unchanged' ? 'rgba(245, 158, 11, 0.03)' : 'rgba(16, 185, 129, 0.02)';
+          targetCtx.fillRect(sc.x - size, sc.y - size, size * 2, size * 2);
+
+          for (const pin of comp.pins || []) {
+            const sp = toScreen(pin.x, pin.y, targetTransform);
+            targetCtx.strokeStyle = compStyle.color;
+            targetCtx.lineWidth = 1;
+            targetCtx.beginPath();
+            targetCtx.moveTo(sc.x, sc.y);
+            targetCtx.lineTo(sp.x, sp.y);
+            targetCtx.stroke();
+          }
+
+          targetCtx.fillStyle = '#ffffff';
+          targetCtx.font = 'bold 10px monospace';
+          targetCtx.textAlign = 'center';
+          targetCtx.fillText(comp.designator, sc.x, sc.y - size - 5);
+          targetCtx.restore();
         }
-        ctx.restore();
       }
-    } else {
-      // Schematic rendering
-      const schRev = revision as any;
-      for (const net of schRev.nets || []) {
-        const netStyle = getDiffStyle(net.diffStatus, isNewRevision);
-        if (netStyle.opacity === 0.2) continue;
+    };
 
-        ctx.save();
-        ctx.strokeStyle = netStyle.color;
-        ctx.lineWidth = net.diffStatus !== 'unchanged' ? 2.5 : 1.5;
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
+    const bounds = diffData.bounds;
+    const cacheKey = JSON.stringify({
+      visibleLayersList,
+      layerOpacitiesMap,
+      customColorsMap,
+      bounds: diffData.bounds,
+      isColorblind
+    });
 
-        for (const seg of net.segments || []) {
-          ctx.beginPath();
-          const p0 = toScreen(seg.points[0].x, seg.points[0].y, currentTransform);
-          ctx.moveTo(p0.x, p0.y);
-          for (let idx = 1; idx < seg.points.length; idx++) {
-            const pt = toScreen(seg.points[idx].x, seg.points[idx].y, currentTransform);
-            ctx.lineTo(pt.x, pt.y);
-          }
-          ctx.stroke();
-        }
-        ctx.restore();
-      }
+    const cacheRef = isNewRevision ? rightRasterCacheRef : leftRasterCacheRef;
 
-      for (const comp of schRev.components || []) {
-        const compStyle = getDiffStyle(comp.diffStatus, isNewRevision);
-        if (compStyle.opacity === 0.2) continue;
+    if (renderMode === 'raster' && (!cacheRef.current || cacheRef.current.key !== cacheKey)) {
+      const R = 8;
+      const bW = Math.max(10, bounds.maxX - bounds.minX);
+      const bH = Math.max(10, bounds.maxY - bounds.minY);
+      const offscreenCanvas = document.createElement('canvas');
+      offscreenCanvas.width = Math.ceil(bW * R);
+      offscreenCanvas.height = Math.ceil(bH * R);
 
-        const sc = toScreen(comp.x, comp.y, currentTransform);
-        const size = 6 * currentTransform.scale;
-
-        ctx.save();
-        ctx.strokeStyle = compStyle.color;
-        ctx.lineWidth = comp.diffStatus !== 'unchanged' ? 3 : 2;
-        ctx.strokeRect(sc.x - size, sc.y - size, size * 2, size * 2);
-        ctx.fillStyle = comp.diffStatus !== 'unchanged' ? 'rgba(245, 158, 11, 0.03)' : 'rgba(16, 185, 129, 0.02)';
-        ctx.fillRect(sc.x - size, sc.y - size, size * 2, size * 2);
-
-        for (const pin of comp.pins || []) {
-          const sp = toScreen(pin.x, pin.y, currentTransform);
-          ctx.strokeStyle = compStyle.color;
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.moveTo(sc.x, sc.y);
-          ctx.lineTo(sp.x, sp.y);
-          ctx.stroke();
-        }
-
-        ctx.fillStyle = '#ffffff';
-        ctx.font = 'bold 10px monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText(comp.designator, sc.x, sc.y - size - 5);
-        ctx.restore();
+      const offCtx = offscreenCanvas.getContext('2d');
+      if (offCtx) {
+        offCtx.fillStyle = '#0b0f19';
+        offCtx.fillRect(0, 0, offscreenCanvas.width, offscreenCanvas.height);
+        const offTransform = {
+          scale: R,
+          offsetX: -bounds.minX * R,
+          offsetY: -bounds.minY * R
+        };
+        drawDiffGeometry(offCtx, offTransform);
+        cacheRef.current = { canvas: offscreenCanvas, key: cacheKey };
       }
     }
-  };
+
+    if (renderMode === 'raster' && cacheRef.current) {
+      ctx.fillStyle = '#0b0f19';
+      ctx.fillRect(0, 0, width, height);
+
+      ctx.strokeStyle = '#1e293b';
+      ctx.lineWidth = 0.5;
+      const gridSize = 20 * currentTransform.scale;
+      const gridOffsetX = currentTransform.offsetX % gridSize;
+      const gridOffsetY = currentTransform.offsetY % gridSize;
+
+      for (let x = gridOffsetX; x < width; x += gridSize) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();
+      }
+      for (let y = gridOffsetY; y < height; y += gridSize) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+      }
+
+      const pMin = toScreen(bounds.minX, bounds.minY, currentTransform);
+      const pMax = toScreen(bounds.maxX, bounds.maxY, currentTransform);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(cacheRef.current.canvas, pMin.x, pMin.y, pMax.x - pMin.x, pMax.y - pMin.y);
+      ctx.imageSmoothingEnabled = true;
+    } else {
+      ctx.fillStyle = '#0b0f19';
+      ctx.fillRect(0, 0, width, height);
+
+      ctx.strokeStyle = '#1e293b';
+      ctx.lineWidth = 0.5;
+      const gridSize = 20 * currentTransform.scale;
+      const gridOffsetX = currentTransform.offsetX % gridSize;
+      const gridOffsetY = currentTransform.offsetY % gridSize;
+
+      for (let x = gridOffsetX; x < width; x += gridSize) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();
+      }
+      for (let y = gridOffsetY; y < height; y += gridSize) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+      }
+
+      drawDiffGeometry(ctx, currentTransform);
+    }
+  }
 
   const handleMouseDown = (e: MouseEvent<HTMLCanvasElement>, side: 'left' | 'right') => {
     setIsPanning(true);
@@ -674,7 +800,7 @@ export default function SideBySideCanvas({
           const pd = Math.hypot(pad.x - native.x, pad.y - native.y);
           if (pd < Math.max(pad.width, pad.height) / 2) {
             matchedText = `Pad: ${comp.designator}.${pad.name} (${pad.net || 'N/C'})`;
-            matchedSubText = `Footprint: ${comp.footprint} | Layer: ${pad.layer} | Diff: ${pad.diffStatus.toUpperCase()}`;
+            matchedSubText = `Footprint: ${comp.footprint} | Layer: ${pad.layer} | Diff: ${(pad.diffStatus || comp.diffStatus || 'unchanged').toUpperCase()}`;
             break;
           }
         }
@@ -790,14 +916,166 @@ export default function SideBySideCanvas({
     }
   };
 
+  // Parity computation
+  const parityA = useMemo(() => {
+    if (!preview || !preview.isOpen || !preview.fileName) {
+      return { matches: false, available: false, reason: 'No active preview' };
+    }
+    const oldRev = diffData.oldRevision as any;
+    const isSameFile = preview.fileName === oldRev.fileName;
+    if (!isSameFile) {
+      return { matches: false, available: false, reason: `File mismatch: preview shows "${preview.fileName}"` };
+    }
+    
+    const visibleLayersMatch = JSON.stringify([...visibleLayersA].sort()) === JSON.stringify([...preview.visibleLayers].sort());
+    
+    const keysA = Object.keys(layerOpacitiesA).filter(k => layerOpacitiesA[k] !== undefined);
+    const keysPrev = Object.keys(preview.layerOpacities).filter(k => preview.layerOpacities[k] !== undefined);
+    const opacitiesMatch = keysA.every(k => layerOpacitiesA[k] === preview.layerOpacities[k]) &&
+                          keysPrev.every(k => layerOpacitiesA[k] === preview.layerOpacities[k]);
+                          
+    const colorsAKeys = Object.keys(customColorsA);
+    const colorsPrevKeys = Object.keys(preview.customColors);
+    const colorsMatch = colorsAKeys.every(k => customColorsA[k] === preview.customColors[k]) &&
+                        colorsPrevKeys.every(k => customColorsA[k] === preview.customColors[k]);
+                        
+    const renderModeMatch = renderModeA === preview.renderMode;
+    const transformMatch = leftTransform.scale === preview.transform?.scale &&
+                          leftTransform.offsetX === preview.transform?.offsetX &&
+                          leftTransform.offsetY === preview.transform?.offsetY;
+                          
+    const matches = visibleLayersMatch && opacitiesMatch && colorsMatch && renderModeMatch && transformMatch;
+    
+    return { matches, available: true, reason: matches ? 'Parity match' : 'Parity mismatch' };
+  }, [preview, diffData.oldRevision, visibleLayersA, layerOpacitiesA, customColorsA, renderModeA, leftTransform]);
+
+  const parityB = useMemo(() => {
+    if (!preview || !preview.isOpen || !preview.fileName) {
+      return { matches: false, available: false, reason: 'No active preview' };
+    }
+    const newRev = diffData.newRevision as any;
+    const isSameFile = preview.fileName === newRev.fileName;
+    if (!isSameFile) {
+      return { matches: false, available: false, reason: `File mismatch: preview shows "${preview.fileName}"` };
+    }
+    
+    const visibleLayersMatch = JSON.stringify([...visibleLayersB].sort()) === JSON.stringify([...preview.visibleLayers].sort());
+    
+    const keysB = Object.keys(layerOpacitiesB).filter(k => layerOpacitiesB[k] !== undefined);
+    const keysPrev = Object.keys(preview.layerOpacities).filter(k => preview.layerOpacities[k] !== undefined);
+    const opacitiesMatch = keysB.every(k => layerOpacitiesB[k] === preview.layerOpacities[k]) &&
+                          keysPrev.every(k => layerOpacitiesB[k] === preview.layerOpacities[k]);
+                          
+    const colorsBKeys = Object.keys(customColorsB);
+    const colorsPrevKeys = Object.keys(preview.customColors);
+    const colorsMatch = colorsBKeys.every(k => customColorsB[k] === preview.customColors[k]) &&
+                        colorsPrevKeys.every(k => customColorsB[k] === preview.customColors[k]);
+                        
+    const renderModeMatch = renderModeB === preview.renderMode;
+    const rightActiveTransform = isLocked ? leftTransform : rightTransform;
+    const transformMatch = rightActiveTransform.scale === preview.transform?.scale &&
+                          rightActiveTransform.offsetX === preview.transform?.offsetX &&
+                          rightActiveTransform.offsetY === preview.transform?.offsetY;
+                          
+    const matches = visibleLayersMatch && opacitiesMatch && colorsMatch && renderModeMatch && transformMatch;
+    
+    return { matches, available: true, reason: matches ? 'Parity match' : 'Parity mismatch' };
+  }, [preview, diffData.newRevision, visibleLayersB, layerOpacitiesB, customColorsB, renderModeB, leftTransform, rightTransform, isLocked]);
+
+  // Sync operations
+  const handleSyncA = () => {
+    if (!preview || !parityA.available) return;
+    setBackupStateA({
+      visibleLayers: [...visibleLayersA],
+      layerOpacities: { ...layerOpacitiesA },
+      customColors: { ...customColorsA },
+      renderMode: renderModeA,
+      transform: { ...leftTransform }
+    });
+    setVisibleLayersA([...preview.visibleLayers]);
+    setLayerOpacitiesA({ ...preview.layerOpacities });
+    setCustomColorsA({ ...preview.customColors });
+    setRenderModeA(preview.renderMode);
+    if (preview.transform) {
+      setLeftTransform({ ...preview.transform });
+      if (isLocked) {
+        setRightTransform({ ...preview.transform });
+      }
+    }
+    saveStateA([...preview.visibleLayers], { ...preview.layerOpacities }, { ...preview.customColors });
+    saveRenderModeA(preview.renderMode);
+
+    window.dispatchEvent(new CustomEvent('cadlab-sync', {
+      detail: { panel: 'A', file: preview.fileName, timestamp: Date.now() }
+    }));
+  };
+
+  const handleUndoA = () => {
+    if (!backupStateA) return;
+    setVisibleLayersA(backupStateA.visibleLayers);
+    setLayerOpacitiesA(backupStateA.layerOpacities);
+    setCustomColorsA(backupStateA.customColors);
+    setRenderModeA(backupStateA.renderMode);
+    setLeftTransform(backupStateA.transform);
+    if (isLocked) {
+      setRightTransform(backupStateA.transform);
+    }
+    saveStateA(backupStateA.visibleLayers, backupStateA.layerOpacities, backupStateA.customColors);
+    saveRenderModeA(backupStateA.renderMode);
+    setBackupStateA(null);
+  };
+
+  const handleSyncB = () => {
+    if (!preview || !parityB.available) return;
+    const rightActiveTransform = isLocked ? leftTransform : rightTransform;
+    setBackupStateB({
+      visibleLayers: [...visibleLayersB],
+      layerOpacities: { ...layerOpacitiesB },
+      customColors: { ...customColorsB },
+      renderMode: renderModeB,
+      transform: { ...rightActiveTransform }
+    });
+    setVisibleLayersB([...preview.visibleLayers]);
+    setLayerOpacitiesB({ ...preview.layerOpacities });
+    setCustomColorsB({ ...preview.customColors });
+    setRenderModeB(preview.renderMode);
+    if (preview.transform) {
+      if (isLocked) {
+        setLeftTransform({ ...preview.transform });
+      }
+      setRightTransform({ ...preview.transform });
+    }
+    saveStateB([...preview.visibleLayers], { ...preview.layerOpacities }, { ...preview.customColors });
+    saveRenderModeB(preview.renderMode);
+
+    window.dispatchEvent(new CustomEvent('cadlab-sync', {
+      detail: { panel: 'B', file: preview.fileName, timestamp: Date.now() }
+    }));
+  };
+
+  const handleUndoB = () => {
+    if (!backupStateB) return;
+    setVisibleLayersB(backupStateB.visibleLayers);
+    setLayerOpacitiesB(backupStateB.layerOpacities);
+    setCustomColorsB(backupStateB.customColors);
+    setRenderModeB(backupStateB.renderMode);
+    if (isLocked) {
+      setLeftTransform(backupStateB.transform);
+    }
+    setRightTransform(backupStateB.transform);
+    saveStateB(backupStateB.visibleLayers, backupStateB.layerOpacities, backupStateB.customColors);
+    saveRenderModeB(backupStateB.renderMode);
+    setBackupStateB(null);
+  };
+
   return (
-    <div ref={containerRef} className="flex-1 flex flex-col bg-slate-950 overflow-hidden relative font-sans">
+    <div ref={containerRef} className="flex-1 flex flex-col bg-slate-955 overflow-hidden relative font-sans">
       
       {/* Top Diff Control Action Toolbar */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-slate-900 shrink-0 z-20 gap-4 flex-wrap bg-slate-950">
         
         {/* Left Panel Zoom Actions */}
-        <div className="bg-slate-900/90 backdrop-blur-md px-3 py-1.5 rounded-lg border border-slate-800 flex items-center gap-2.5 text-xs font-mono text-slate-300 shadow-xl">
+        <div className="bg-slate-900/90 backdrop-blur-md px-3 py-1.5 rounded-lg border border-slate-800 flex items-center gap-2 text-xs font-mono text-slate-300 shadow-xl">
           <span className="font-semibold text-red-400">Rev A:</span>
           <span>{Math.round(leftTransform.scale * 100)}%</span>
           <button
@@ -833,6 +1111,33 @@ export default function SideBySideCanvas({
             <option value="400">400%</option>
             <option value="800">800%</option>
           </select>
+
+          {/* Left Parity Actions */}
+          {parityA.available && (
+            <div className="flex items-center gap-1.5 ml-2 pl-2 border-l border-slate-800 shrink-0">
+              <span className={`w-2 h-2 rounded-full ${parityA.matches ? 'bg-green-500' : 'bg-amber-500 animate-pulse'}`} title={parityA.reason} />
+              {parityA.matches ? (
+                <span className="text-[10px] text-green-400 font-bold">In Sync</span>
+              ) : (
+                <button
+                  onClick={handleSyncA}
+                  className="px-2 py-0.5 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 rounded text-[9px] font-bold cursor-pointer transition-all"
+                  title="Sync with preview"
+                >
+                  Sync
+                </button>
+              )}
+              {backupStateA && (
+                <button
+                  onClick={handleUndoA}
+                  className="px-2 py-0.5 bg-slate-850 hover:bg-slate-800 text-slate-300 border border-slate-800 rounded text-[9px] font-bold cursor-pointer transition-all"
+                  title="Undo last sync"
+                >
+                  Undo
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Center Control Actions */}
@@ -843,7 +1148,7 @@ export default function SideBySideCanvas({
             className={`px-4 py-1.5 backdrop-blur-md rounded-full border shadow-xl flex items-center gap-2 text-xs font-semibold cursor-pointer transition-all ${
               isLocked 
                 ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20 hover:bg-cyan-500/20' 
-                : 'bg-slate-900/90 text-slate-400 border-slate-800 hover:text-slate-300 hover:bg-slate-800'
+                : 'bg-slate-900/90 text-slate-400 border-slate-800 hover:text-slate-300 hover:bg-slate-808'
             }`}
             title="Toggle Synchronized Viewports (Alt+L)"
           >
@@ -870,7 +1175,7 @@ export default function SideBySideCanvas({
             className={`px-3 py-1.5 backdrop-blur-md rounded-full border shadow-xl flex items-center gap-1.5 text-xs font-semibold cursor-pointer transition-all ${
               isColorblind 
                 ? 'bg-amber-500/10 text-amber-400 border-amber-500/20 hover:bg-amber-500/20' 
-                : 'bg-slate-900/90 text-slate-400 border-slate-800 hover:text-slate-300 hover:bg-slate-800'
+                : 'bg-slate-900/90 text-slate-400 border-slate-800 hover:text-slate-300 hover:bg-slate-808'
             }`}
             title="Toggle Colorblind Accessible Diff Mode (replaces red/green with blue/orange-red & patterns)"
           >
@@ -879,7 +1184,7 @@ export default function SideBySideCanvas({
         </div>
 
         {/* Right Panel Zoom Actions */}
-        <div className="bg-slate-900/90 backdrop-blur-md px-3 py-1.5 rounded-lg border border-slate-800 flex items-center gap-2.5 text-xs font-mono text-slate-300 shadow-xl">
+        <div className="bg-slate-900/90 backdrop-blur-md px-3 py-1.5 rounded-lg border border-slate-800 flex items-center gap-2 text-xs font-mono text-slate-300 shadow-xl">
           <span className="font-semibold text-emerald-400">Rev B:</span>
           <span>{isLocked ? Math.round(leftTransform.scale * 100) : Math.round(rightTransform.scale * 100)}%</span>
           <button
@@ -919,6 +1224,33 @@ export default function SideBySideCanvas({
             <option value="400">400%</option>
             <option value="800">800%</option>
           </select>
+
+          {/* Right Parity Actions */}
+          {parityB.available && (
+            <div className="flex items-center gap-1.5 ml-2 pl-2 border-l border-slate-800 shrink-0">
+              <span className={`w-2 h-2 rounded-full ${parityB.matches ? 'bg-green-500' : 'bg-amber-500 animate-pulse'}`} title={parityB.reason} />
+              {parityB.matches ? (
+                <span className="text-[10px] text-green-400 font-bold">In Sync</span>
+              ) : (
+                <button
+                  onClick={handleSyncB}
+                  className="px-2 py-0.5 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 rounded text-[9px] font-bold cursor-pointer transition-all"
+                  title="Sync with preview"
+                >
+                  Sync
+                </button>
+              )}
+              {backupStateB && (
+                <button
+                  onClick={handleUndoB}
+                  className="px-2 py-0.5 bg-slate-850 hover:bg-slate-800 text-slate-300 border border-slate-800 rounded text-[9px] font-bold cursor-pointer transition-all"
+                  title="Undo last sync"
+                >
+                  Undo
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
       </div>
@@ -959,25 +1291,31 @@ export default function SideBySideCanvas({
             <div className="w-[200px] flex flex-col h-full overflow-hidden text-xs">
               
               {/* Header */}
-              <div className="flex items-center justify-between p-2 border-b border-slate-800/80 bg-slate-950/20 shrink-0">
-                <span className="font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1">
-                  <Layers className="w-3.5 h-3.5 text-cyan-500" /> Rev A Layers
-                </span>
-                <button 
-                  onClick={() => {
-                    setSidebarOpenA(false);
-                    saveSidebarAVisible(false);
-                    handleSidebarToggle();
-                  }}
-                  className="p-1 hover:bg-slate-800 rounded text-slate-500 hover:text-slate-300 cursor-pointer"
-                  title="Collapse Sidebar"
-                >
-                  <ChevronLeft className="w-3.5 h-3.5" />
-                </button>
+              <div className="flex flex-col p-2 border-b border-slate-800/80 bg-slate-950/20 shrink-0 gap-1">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1">
+                    <Layers className="w-3.5 h-3.5 text-cyan-500" /> Rev A Layers
+                  </span>
+                  <button 
+                    onClick={() => {
+                      setSidebarOpenA(false);
+                      saveSidebarAVisible(false);
+                      handleSidebarToggle();
+                    }}
+                    className="p-1 hover:bg-slate-800 rounded text-slate-500 hover:text-slate-300 cursor-pointer"
+                    title="Collapse Sidebar"
+                  >
+                    <ChevronLeft className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                <div className="flex justify-between text-[9px] font-mono text-slate-505 font-bold">
+                  <span>Total: {layersA.length}</span>
+                  <span>Visible: {visibleLayersA.length}</span>
+                </div>
               </div>
 
               {/* Action Toolbar */}
-              <div className="p-1.5 border-b border-slate-850 flex gap-1 items-center shrink-0 flex-wrap bg-slate-950/40">
+              <div className="p-1.5 border-b border-slate-855 flex gap-1 items-center shrink-0 flex-wrap bg-slate-950/40">
                 <button 
                   onClick={() => handleApplyToBoth('left')}
                   className="flex-1 py-1 px-1 text-[9px] hover:bg-slate-800 border border-slate-800 hover:border-slate-700 text-slate-300 rounded transition-colors cursor-pointer flex items-center justify-center gap-1"
@@ -994,16 +1332,33 @@ export default function SideBySideCanvas({
                   <RefreshCw className="w-2.5 h-2.5" />
                   <span>Reset</span>
                 </button>
+                
+                {/* Render Mode toggle */}
+                <div className="flex bg-slate-950 p-0.5 rounded border border-slate-800 shrink-0 text-[8px] font-bold">
+                  <button
+                    onClick={() => { setRenderModeA('vector'); saveRenderModeA('vector'); }}
+                    className={`px-1 py-0.5 rounded transition-all cursor-pointer ${renderModeA === 'vector' ? 'bg-slate-800 text-white font-bold' : 'text-slate-500'}`}
+                  >
+                    Vec
+                  </button>
+                  <button
+                    onClick={() => { setRenderModeA('raster'); saveRenderModeA('raster'); }}
+                    className={`px-1 py-0.5 rounded transition-all cursor-pointer ${renderModeA === 'raster' ? 'bg-slate-800 text-white font-bold' : 'text-slate-500'}`}
+                  >
+                    Rast
+                  </button>
+                </div>
               </div>
 
               {/* Show only diff checkbox */}
-              <div className="p-2 border-b border-slate-850 flex items-center justify-between bg-slate-950/20 text-[10px] shrink-0 text-slate-400">
+              <div className="p-2 border-b border-slate-855 flex items-center justify-between bg-slate-950/20 text-[10px] shrink-0 text-slate-400">
                 <span>Show only diff layers</span>
                 <input 
                   type="checkbox"
                   checked={showOnlyDiffA}
                   onChange={(e) => setShowOnlyDiffA(e.target.checked)}
-                  className="w-3 h-3 bg-slate-950 border border-slate-800 rounded"
+                  className="w-3 h-3 bg-slate-955 border border-slate-800 rounded"
+                  title="Show only diff layers A"
                 />
               </div>
 
@@ -1015,6 +1370,8 @@ export default function SideBySideCanvas({
                   const opacity = layerOpacitiesA[layer] ?? style.opacity ?? 1;
                   const activeColor = customColorsA[layer] || style.color;
                   const tag = getLayerTypeTag(layer);
+                  const primCount = primitivesCountA[layer] || 0;
+                  const swatchBorder = getContrastOutlineColor(activeColor);
 
                   return (
                     <div key={layer} className="p-1.5 rounded-lg bg-slate-950/60 border border-slate-900 flex flex-col gap-1 transition-all hover:border-slate-800">
@@ -1032,11 +1389,11 @@ export default function SideBySideCanvas({
                             className="text-slate-500 hover:text-white cursor-pointer"
                             title={isVisible ? "Hide Layer" : "Show Layer"}
                           >
-                            {isVisible ? <Eye className="w-3 h-3 text-cyan-400" /> : <EyeOff className="w-3 h-3 text-slate-700" />}
+                            {isVisible ? <Eye className="w-3.5 h-3.5 text-cyan-400" /> : <EyeOff className="w-3.5 h-3.5 text-slate-700" />}
                           </button>
 
                           {/* Color picker Swatch */}
-                          <div className="w-3 h-3 rounded-full border relative shrink-0" style={{ backgroundColor: activeColor, borderColor: swatchOutlineColor }}>
+                          <div className="w-3.5 h-3.5 rounded-full border relative shrink-0" style={{ backgroundColor: activeColor, borderColor: swatchBorder }}>
                             <input 
                               type="color"
                               value={activeColor}
@@ -1058,15 +1415,20 @@ export default function SideBySideCanvas({
                           </span>
                         </div>
 
-                        {/* Type Tag badge */}
-                        <span className={`text-[8px] font-mono font-bold px-1 py-0.2 rounded shrink-0 ${
-                          tag === 'copper' ? 'bg-red-500/10 text-red-400' :
-                          tag === 'silk' ? 'bg-yellow-500/10 text-yellow-400' :
-                          tag === 'mask' ? 'bg-purple-500/10 text-purple-400' :
-                          tag === 'paste' ? 'bg-indigo-500/10 text-indigo-400' : 'bg-slate-800 text-slate-500'
-                        }`}>
-                          {tag}
-                        </span>
+                        {/* Prim Count and Tag */}
+                        <div className="flex items-center gap-1 shrink-0">
+                          <span className="text-[8px] font-mono text-slate-500 font-bold bg-slate-900/60 px-1 py-0.2 rounded" title="Design primitives count">
+                            {primCount}
+                          </span>
+                          <span className={`text-[8px] font-mono font-bold px-1 py-0.2 rounded shrink-0 ${
+                            tag === 'copper' ? 'bg-red-500/10 text-red-400' :
+                            tag === 'silk' ? 'bg-yellow-500/10 text-yellow-400' :
+                            tag === 'mask' ? 'bg-purple-500/10 text-purple-400' :
+                            tag === 'paste' ? 'bg-indigo-500/10 text-indigo-400' : 'bg-slate-805 text-slate-505'
+                          }`}>
+                            {tag}
+                          </span>
+                        </div>
                       </div>
 
                       {/* Opacity slider */}
@@ -1078,6 +1440,7 @@ export default function SideBySideCanvas({
                             max="1"
                             step="0.05"
                             value={opacity}
+                            title="Layer opacity range A"
                             onChange={(e) => {
                               const val = parseFloat(e.target.value);
                               setLayerOpacitiesA(prev => {
@@ -1109,16 +1472,16 @@ export default function SideBySideCanvas({
                 saveSidebarAVisible(true);
                 handleSidebarToggle();
               }}
-              className="absolute left-0 top-0 bottom-0 w-3 bg-slate-900/90 hover:bg-slate-800 border-r border-slate-800 flex items-center justify-center cursor-pointer z-10 transition-colors"
+              className="absolute left-0 top-0 bottom-0 w-3 bg-slate-900/90 hover:bg-slate-800 border-r border-slate-855 flex items-center justify-center cursor-pointer z-10 transition-colors"
               title="Expand Left Layers"
             >
-              <ChevronRight className="w-3.5 h-3.5 text-slate-500" />
+              <ChevronRight className="w-3.5 h-3.5 text-slate-550" />
             </button>
           )}
 
           {/* Left Canvas */}
           <div className="flex-1 h-full relative">
-            <div className="absolute top-14 left-4 z-10 px-2 py-0.5 bg-red-950/60 backdrop-blur-sm border border-red-500/20 text-[10px] font-mono font-semibold text-red-400 rounded pointer-events-none">
+            <div className="absolute top-14 left-4 z-10 px-2 py-0.5 bg-red-955/60 backdrop-blur-sm border border-red-500/20 text-[10px] font-mono font-semibold text-red-400 rounded pointer-events-none">
               Base Revision A (Old)
             </div>
             <canvas
@@ -1133,7 +1496,7 @@ export default function SideBySideCanvas({
           </div>
         </div>
 
-        {/* ================= VERTICAL DIVIDERSPLITTER ================= */}
+        {/* ================= VERTICAL DIVIDER/SPLITTER ================= */}
         {isBorderVisible && (
           <div
             ref={borderRef}
@@ -1167,25 +1530,31 @@ export default function SideBySideCanvas({
             <div className="w-[200px] flex flex-col h-full overflow-hidden text-xs">
               
               {/* Header */}
-              <div className="flex items-center justify-between p-2 border-b border-slate-800/80 bg-slate-950/20 shrink-0">
-                <span className="font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1">
-                  <Layers className="w-3.5 h-3.5 text-emerald-500" /> Rev B Layers
-                </span>
-                <button 
-                  onClick={() => {
-                    setSidebarOpenB(false);
-                    saveSidebarBVisible(false);
-                    handleSidebarToggle();
-                  }}
-                  className="p-1 hover:bg-slate-800 rounded text-slate-500 hover:text-slate-300 cursor-pointer"
-                  title="Collapse Sidebar"
-                >
-                  <ChevronLeft className="w-3.5 h-3.5" />
-                </button>
+              <div className="flex flex-col p-2 border-b border-slate-800/80 bg-slate-950/20 shrink-0 gap-1">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1">
+                    <Layers className="w-3.5 h-3.5 text-emerald-500" /> Rev B Layers
+                  </span>
+                  <button 
+                    onClick={() => {
+                      setSidebarOpenB(false);
+                      saveSidebarBVisible(false);
+                      handleSidebarToggle();
+                    }}
+                    className="p-1 hover:bg-slate-800 rounded text-slate-500 hover:text-slate-300 cursor-pointer"
+                    title="Collapse Sidebar"
+                  >
+                    <ChevronLeft className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                <div className="flex justify-between text-[9px] font-mono text-slate-505 font-bold">
+                  <span>Total: {layersB.length}</span>
+                  <span>Visible: {visibleLayersB.length}</span>
+                </div>
               </div>
 
               {/* Action Toolbar */}
-              <div className="p-1.5 border-b border-slate-850 flex gap-1 items-center shrink-0 flex-wrap bg-slate-950/40">
+              <div className="p-1.5 border-b border-slate-855 flex gap-1 items-center shrink-0 flex-wrap bg-slate-950/40">
                 <button 
                   onClick={() => handleApplyToBoth('right')}
                   className="flex-1 py-1 px-1 text-[9px] hover:bg-slate-800 border border-slate-800 hover:border-slate-700 text-slate-300 rounded transition-colors cursor-pointer flex items-center justify-center gap-1"
@@ -1202,16 +1571,33 @@ export default function SideBySideCanvas({
                   <RefreshCw className="w-2.5 h-2.5" />
                   <span>Reset</span>
                 </button>
+
+                {/* Render Mode toggle */}
+                <div className="flex bg-slate-950 p-0.5 rounded border border-slate-800 shrink-0 text-[8px] font-bold">
+                  <button
+                    onClick={() => { setRenderModeB('vector'); saveRenderModeB('vector'); }}
+                    className={`px-1 py-0.5 rounded transition-all cursor-pointer ${renderModeB === 'vector' ? 'bg-slate-800 text-white font-bold' : 'text-slate-550'}`}
+                  >
+                    Vec
+                  </button>
+                  <button
+                    onClick={() => { setRenderModeB('raster'); saveRenderModeB('raster'); }}
+                    className={`px-1 py-0.5 rounded transition-all cursor-pointer ${renderModeB === 'raster' ? 'bg-slate-800 text-white font-bold' : 'text-slate-550'}`}
+                  >
+                    Rast
+                  </button>
+                </div>
               </div>
 
               {/* Show only diff checkbox */}
-              <div className="p-2 border-b border-slate-850 flex items-center justify-between bg-slate-950/20 text-[10px] shrink-0 text-slate-400">
+              <div className="p-2 border-b border-slate-855 flex items-center justify-between bg-slate-950/20 text-[10px] shrink-0 text-slate-400">
                 <span>Show only diff layers</span>
                 <input 
                   type="checkbox"
                   checked={showOnlyDiffB}
                   onChange={(e) => setShowOnlyDiffB(e.target.checked)}
                   className="w-3 h-3 bg-slate-950 border border-slate-800 rounded"
+                  title="Show only diff layers B"
                 />
               </div>
 
@@ -1223,6 +1609,8 @@ export default function SideBySideCanvas({
                   const opacity = layerOpacitiesB[layer] ?? style.opacity ?? 1;
                   const activeColor = customColorsB[layer] || style.color;
                   const tag = getLayerTypeTag(layer);
+                  const primCount = primitivesCountB[layer] || 0;
+                  const swatchBorder = getContrastOutlineColor(activeColor);
 
                   return (
                     <div key={layer} className="p-1.5 rounded-lg bg-slate-950/60 border border-slate-900 flex flex-col gap-1 transition-all hover:border-slate-800">
@@ -1237,14 +1625,14 @@ export default function SideBySideCanvas({
                                 return next;
                               });
                             }}
-                            className="text-slate-500 hover:text-white cursor-pointer"
+                            className="text-slate-550 hover:text-white cursor-pointer"
                             title={isVisible ? "Hide Layer" : "Show Layer"}
                           >
-                            {isVisible ? <Eye className="w-3 h-3 text-cyan-400" /> : <EyeOff className="w-3 h-3 text-slate-700" />}
+                            {isVisible ? <Eye className="w-3.5 h-3.5 text-cyan-400" /> : <EyeOff className="w-3.5 h-3.5 text-slate-700" />}
                           </button>
 
                           {/* Color Swatch */}
-                          <div className="w-3 h-3 rounded-full border relative shrink-0" style={{ backgroundColor: activeColor, borderColor: swatchOutlineColor }}>
+                          <div className="w-3.5 h-3.5 rounded-full border relative shrink-0" style={{ backgroundColor: activeColor, borderColor: swatchBorder }}>
                             <input 
                               type="color"
                               value={activeColor}
@@ -1266,15 +1654,20 @@ export default function SideBySideCanvas({
                           </span>
                         </div>
 
-                        {/* Type tag Badge */}
-                        <span className={`text-[8px] font-mono font-bold px-1 py-0.2 rounded shrink-0 ${
-                          tag === 'copper' ? 'bg-red-500/10 text-red-400' :
-                          tag === 'silk' ? 'bg-yellow-500/10 text-yellow-400' :
-                          tag === 'mask' ? 'bg-purple-500/10 text-purple-400' :
-                          tag === 'paste' ? 'bg-indigo-500/10 text-indigo-400' : 'bg-slate-800 text-slate-500'
-                        }`}>
-                          {tag}
-                        </span>
+                        {/* Prim Count and Tag */}
+                        <div className="flex items-center gap-1 shrink-0">
+                          <span className="text-[8px] font-mono text-slate-505 font-bold bg-slate-900/60 px-1 py-0.2 rounded" title="Design primitives count">
+                            {primCount}
+                          </span>
+                          <span className={`text-[8px] font-mono font-bold px-1 py-0.2 rounded shrink-0 ${
+                            tag === 'copper' ? 'bg-red-500/10 text-red-400' :
+                            tag === 'silk' ? 'bg-yellow-500/10 text-yellow-400' :
+                            tag === 'mask' ? 'bg-purple-500/10 text-purple-400' :
+                            tag === 'paste' ? 'bg-indigo-500/10 text-indigo-400' : 'bg-slate-805 text-slate-505'
+                          }`}>
+                            {tag}
+                          </span>
+                        </div>
                       </div>
 
                       {/* Opacity slider */}
@@ -1286,6 +1679,7 @@ export default function SideBySideCanvas({
                             max="1"
                             step="0.05"
                             value={opacity}
+                            title="Layer opacity range B"
                             onChange={(e) => {
                               const val = parseFloat(e.target.value);
                               setLayerOpacitiesB(prev => {
@@ -1294,9 +1688,9 @@ export default function SideBySideCanvas({
                                 return next;
                               });
                             }}
-                            className="flex-1 h-0.5 bg-slate-800 appearance-none cursor-pointer accent-cyan-500"
+                            className="flex-1 h-0.5 bg-slate-805 appearance-none cursor-pointer accent-cyan-500"
                           />
-                          <span className="text-[8px] font-mono text-slate-500 font-bold min-w-[18px] text-right">
+                          <span className="text-[8px] font-mono text-slate-505 font-bold min-w-[18px] text-right">
                             {Math.round(opacity * 100)}%
                           </span>
                         </div>
@@ -1317,16 +1711,16 @@ export default function SideBySideCanvas({
                 saveSidebarBVisible(true);
                 handleSidebarToggle();
               }}
-              className="absolute left-0 top-0 bottom-0 w-3 bg-slate-900/90 hover:bg-slate-800 border-r border-slate-800 flex items-center justify-center cursor-pointer z-10 transition-colors"
+              className="absolute left-0 top-0 bottom-0 w-3 bg-slate-900/90 hover:bg-slate-800 border-r border-slate-808 flex items-center justify-center cursor-pointer z-10 transition-colors"
               title="Expand Right Layers"
             >
-              <ChevronRight className="w-3.5 h-3.5 text-slate-500" />
+              <ChevronRight className="w-3.5 h-3.5 text-slate-550" />
             </button>
           )}
 
           {/* Right Canvas */}
           <div className="flex-1 h-full relative">
-            <div className="absolute top-14 left-4 z-10 px-2 py-0.5 bg-emerald-950/60 backdrop-blur-sm border border-emerald-500/20 text-[10px] font-mono font-semibold text-emerald-400 rounded pointer-events-none">
+            <div className="absolute top-14 left-4 z-10 px-2 py-0.5 bg-emerald-955/60 backdrop-blur-sm border border-emerald-500/20 text-[10px] font-mono font-semibold text-emerald-400 rounded pointer-events-none">
               Target Revision B (New)
             </div>
             <canvas
@@ -1346,6 +1740,56 @@ export default function SideBySideCanvas({
   );
 }
 
+function getPrimitivesCountPerLayer(revision: unknown): Record<string, number> {
+  const counts: Record<string, number> = {};
+  if (!revision) return counts;
+
+  const rev = revision as {
+    traces?: { layer?: string }[];
+    vias?: { layers?: string[] }[];
+    components?: { layer?: string; pads?: { layer?: string }[] }[];
+    nets?: { segments?: { points?: unknown[] }[] }[];
+  };
+
+  // PCB revision
+  if (rev.traces || rev.vias || rev.components) {
+    // 1. Traces
+    for (const t of rev.traces || []) {
+      if (t.layer) {
+        counts[t.layer] = (counts[t.layer] || 0) + 1;
+      }
+    }
+    // 2. Vias
+    for (const v of rev.vias || []) {
+      counts['Vias'] = (counts['Vias'] || 0) + 1;
+      if (v.layers && Array.isArray(v.layers)) {
+        for (const l of v.layers) {
+          counts[l] = (counts[l] || 0) + 1;
+        }
+      }
+    }
+    // 3. Components & Pads
+    for (const comp of rev.components || []) {
+      if (comp.layer) {
+        counts[comp.layer] = (counts[comp.layer] || 0) + 1;
+      }
+      for (const pad of comp.pads || []) {
+        if (pad.layer) {
+          counts[pad.layer] = (counts[pad.layer] || 0) + 1;
+        }
+      }
+    }
+  } else if (rev.nets || rev.components) {
+    // Schematic
+    const schComponentsCount = (rev.components || []).length;
+    let schNetsCount = 0;
+    for (const net of rev.nets || []) {
+      schNetsCount += (net.segments || []).length;
+    }
+    counts['Default'] = schComponentsCount + schNetsCount;
+  }
+  return counts;
+}
 // Distance helper
 function pointToSegmentDistance(pt: Point, p1: Point, p2: Point): number {
   const l2 = Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2);

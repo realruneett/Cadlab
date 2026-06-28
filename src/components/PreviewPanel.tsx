@@ -24,6 +24,7 @@ interface PreviewPanelProps {
   onSetOpacity: (layerId: string, opacity: number) => void;
   onShowAllLayers: () => void;
   onHideAllLayers: () => void;
+  isColorblind?: boolean;
 }
 
 export default function PreviewPanel({
@@ -40,6 +41,7 @@ export default function PreviewPanel({
   onSetOpacity,
   onShowAllLayers,
   onHideAllLayers,
+  isColorblind = false,
 }: PreviewPanelProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const [showLegend, setShowLegend] = useState(true);
@@ -160,6 +162,7 @@ export default function PreviewPanel({
               layerOpacities={layerOpacities}
               highlightedChange={highlightedChange}
               previewMode={true}
+              isColorblind={isColorblind}
             />
           )}
         </div>

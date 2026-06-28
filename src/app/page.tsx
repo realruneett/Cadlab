@@ -82,6 +82,33 @@ export default function Dashboard() {
   // Sidebar Toggling & Animation States
   const [isSidebarVisible, setIsSidebarVisible] = useState<boolean>(true);
 
+  // Colorblind Mode Settings
+  const [isColorblind, setIsColorblind] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const slug = selectedRepo?.slug || 'local';
+    setIsColorblind(localStorage.getItem(`project:${slug}.isColorblindDiff`) === 'true');
+  }, [selectedRepo]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleStorage = () => {
+      const slug = selectedRepo?.slug || 'local';
+      setIsColorblind(localStorage.getItem(`project:${slug}.isColorblindDiff`) === 'true');
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, [selectedRepo]);
+
+  const toggleColorblind = () => {
+    const slug = selectedRepo?.slug || 'local';
+    const next = !isColorblind;
+    setIsColorblind(next);
+    localStorage.setItem(`project:${slug}.isColorblindDiff`, String(next));
+    window.dispatchEvent(new Event('storage'));
+  };
+
   // Preview hook and trigger
   const preview = usePreview();
 
@@ -391,14 +418,27 @@ export default function Dashboard() {
               <span className="text-[11px] font-bold text-slate-400 font-mono uppercase tracking-wider flex items-center gap-1.5">
                 <GitBranch className="w-3.5 h-3.5 text-cyan-400" /> Layer Revision Setup
               </span>
-              <button
-                onClick={() => setIsDiffMode(!isDiffMode)}
-                className={`text-[10px] font-semibold px-2 py-0.5 rounded transition-all border ${
-                  isDiffMode ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-slate-900 text-slate-400 border-slate-800'
-                }`}
-              >
-                {isDiffMode ? 'Diff Active' : 'Enable Diff'}
-              </button>
+              <div className="flex gap-1.5">
+                <button
+                  onClick={() => setIsDiffMode(!isDiffMode)}
+                  className={`text-[10px] font-semibold px-2 py-0.5 rounded transition-all border ${
+                    isDiffMode ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-slate-900 text-slate-400 border-slate-800'
+                  }`}
+                >
+                  {isDiffMode ? 'Diff Active' : 'Enable Diff'}
+                </button>
+                {isDiffMode && (
+                  <button
+                    onClick={toggleColorblind}
+                    className={`text-[10px] font-semibold px-2 py-0.5 rounded transition-all border ${
+                      isColorblind ? 'bg-amber-500/25 text-amber-400 border-amber-500/30' : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
+                    }`}
+                    title="Toggle Colorblind Mode"
+                  >
+                    👁️ Colorblind
+                  </button>
+                )}
+              </div>
             </div>
 
             <div className="space-y-2 bg-slate-950 p-3 rounded-xl border border-slate-900 text-xs font-mono">
@@ -540,13 +580,14 @@ export default function Dashboard() {
 
           <div className="flex-1 relative min-h-0">
             {isDiffMode && diffData ? (
-              <DiffCanvas diffData={diffData} visibleLayers={visibleLayers} opacity={opacity} />
+              <DiffCanvas diffData={diffData} visibleLayers={visibleLayers} opacity={opacity} isColorblind={isColorblind} />
             ) : parsedData ? (
               <HardwareCanvas
                 data={parsedData} visibleLayers={visibleLayers} annotations={annotations}
                 selectedAnnotationId={selectedAnnotationId} reviewMode={reviewMode}
                 onAddAnnotation={(x, y) => { setPendingCoords({ x, y }); setIsAddingAnnotation(true); }}
                 onSelectAnnotation={setSelectedAnnotationId}
+                isColorblind={isColorblind}
               />
             ) : (
               <div className="w-full h-full rounded-xl border border-slate-800 bg-slate-950/30 flex flex-col items-center justify-center text-slate-500 gap-2 font-mono text-xs">
@@ -636,6 +677,7 @@ export default function Dashboard() {
         onSetOpacity={preview.setLayerOpacity}
         onShowAllLayers={preview.showAllLayers}
         onHideAllLayers={preview.hideAllLayers}
+        isColorblind={isColorblind}
       />
     </div>
   );
