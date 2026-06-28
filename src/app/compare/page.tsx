@@ -685,7 +685,7 @@ export default function ComparePage() {
                   <div className="text-xs text-slate-500 max-w-md font-mono">{visualDiffError}</div>
                 </div>
               ) : (
-                clientDiffData && <SideBySideCanvas diffData={clientDiffData} />
+                clientDiffData && <SideBySideCanvas diffData={clientDiffData} projectSlug={mode === 'github' ? selectedRepoSlug : 'local'} />
               )
             ) : (
               <CompareView
