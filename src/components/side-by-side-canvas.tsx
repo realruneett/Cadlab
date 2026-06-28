@@ -21,6 +21,7 @@ export default function SideBySideCanvas({
   const leftCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const rightCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const borderRef = useRef<HTMLDivElement | null>(null);
 
   // Per-panel independent transform states
   const [leftTransform, setLeftTransform] = useState<ViewportTransform>({ scale: 1, offsetX: 0, offsetY: 0 });
@@ -34,6 +35,12 @@ export default function SideBySideCanvas({
   const [isPanning, setIsPanning] = useState(false);
   const [dragStart, setDragStart] = useState<Point>({ x: 0, y: 0 });
   const [hoverInfo, setHoverInfo] = useState<{ x: number; y: number; text: string; subText?: string; side: 'left' | 'right' } | null>(null);
+
+  // Theme & Border states
+  const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
+  const [isBorderVisible, setIsBorderVisible] = useState<boolean>(true);
+  const [isBorderHovered, setIsBorderHovered] = useState<boolean>(false);
+  const [isBorderFocused, setIsBorderFocused] = useState<boolean>(false);
 
   const canvasWidth = Math.max(100, Math.floor(dimensions.width / 2) - 8); // split width minus padding/border
 
@@ -59,12 +66,47 @@ export default function SideBySideCanvas({
     }
   }, [diffData, canvasWidth, dimensions.height]);
 
+  // Mode detection: Automatically detect class 'dark' or colorScheme on documentElement
+  useEffect(() => {
+    const checkTheme = () => {
+      const isDark = document.documentElement.classList.contains('dark') || 
+                     document.documentElement.style.colorScheme === 'dark' ||
+                     window.matchMedia('(prefers-color-scheme: dark)').matches;
+      setIsDarkMode(isDark);
+    };
+
+    checkTheme();
+
+    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    mediaQuery.addEventListener('change', checkTheme);
+    
+    const observer = new MutationObserver(checkTheme);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+
+    return () => {
+      mediaQuery.removeEventListener('change', checkTheme);
+      observer.disconnect();
+    };
+  }, []);
+
   // Persist Lock state per project slug
   useEffect(() => {
     if (projectSlug) {
       const persisted = localStorage.getItem(`diff-zoom-locked-${projectSlug}`);
       if (persisted !== null) {
         setIsLocked(persisted === 'true');
+      }
+    }
+  }, [projectSlug]);
+
+  // Persist Border visibility preference per project
+  useEffect(() => {
+    if (projectSlug) {
+      const persisted = localStorage.getItem(`project:${projectSlug}.diffBorderVisible`);
+      if (persisted !== null) {
+        setIsBorderVisible(persisted === 'true');
+      } else {
+        setIsBorderVisible(true);
       }
     }
   }, [projectSlug]);
@@ -78,6 +120,16 @@ export default function SideBySideCanvas({
       if (next) {
         // Force sync: align Revision B (right) with Revision A (left) viewport
         setRightTransform(leftTransform);
+      }
+      return next;
+    });
+  };
+
+  const toggleBorder = () => {
+    setIsBorderVisible(prev => {
+      const next = !prev;
+      if (projectSlug) {
+        localStorage.setItem(`project:${projectSlug}.diffBorderVisible`, String(next));
       }
       return next;
     });
@@ -101,13 +153,18 @@ export default function SideBySideCanvas({
     drawCanvas(rightCanvasRef.current, true, rightTransform);
   }, [diffData, visibleLayers, leftTransform, rightTransform, canvasWidth, dimensions.height]);
 
-  // Keyboard accessibility listeners (Alt + Key combinations)
+  // Keyboard accessibility listeners (Alt + Key / Ctrl + Key combinations)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Alt+L: Toggle Sync Lock
       if (e.altKey && e.key.toLowerCase() === 'l') {
         e.preventDefault();
         toggleLock();
+      }
+      // Ctrl+| or Cmd+| (Toggle Border visibility)
+      if ((e.ctrlKey || e.metaKey) && (e.key === '|' || e.key === '\\')) {
+        e.preventDefault();
+        toggleBorder();
       }
       // Alt+1: Zoom In Left
       if (e.altKey && e.key === '1') {
@@ -142,7 +199,7 @@ export default function SideBySideCanvas({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isLocked, leftTransform, rightTransform, canvasWidth]);
+  }, [isLocked, leftTransform, rightTransform, canvasWidth, projectSlug]);
 
   const isLayerVisible = (layerName: string) => {
     if (diffData.type === 'schematic') return true;
@@ -679,7 +736,7 @@ export default function SideBySideCanvas({
       {/* Synchronized Side-by-Side Canvas Columns */}
       <div className="flex flex-1 w-full h-full relative">
         {/* Left Column: Old Revision */}
-        <div className="flex-1 h-full relative border-r border-slate-800/60">
+        <div className="flex-1 h-full relative">
           <div className="absolute top-14 left-4 z-10 px-2 py-0.5 bg-red-950/60 backdrop-blur-sm border border-red-500/20 text-[10px] font-mono font-semibold text-red-400 rounded">
             Base Revision A (Old)
           </div>
@@ -695,6 +752,26 @@ export default function SideBySideCanvas({
             className={`w-full h-full block cursor-grab ${isPanning ? 'cursor-grabbing' : ''}`}
           />
         </div>
+
+        {/* Dynamic Vertical Separation Border splitter */}
+        {isBorderVisible && (
+          <div
+            ref={borderRef}
+            tabIndex={0}
+            className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-[3px] z-10 rounded-full transition-colors duration-200 focus:outline-none pointer-events-auto"
+            style={{
+              backgroundColor: isBorderHovered || isBorderFocused
+                ? '#2B6CB0' 
+                : (isDarkMode ? '#BFBFBF' : '#4B4B4B'),
+              cursor: 'col-resize'
+            }}
+            onMouseEnter={() => setIsBorderHovered(true)}
+            onMouseLeave={() => setIsBorderHovered(false)}
+            onFocus={() => setIsBorderFocused(true)}
+            onBlur={() => setIsBorderFocused(false)}
+            aria-label="Diff panel separator"
+          />
+        )}
 
         {/* Right Column: New Revision */}
         <div className="flex-1 h-full relative">
